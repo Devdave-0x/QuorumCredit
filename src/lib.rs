@@ -1,10 +1,14 @@
 #![no_std]
 
 mod errors;
+mod fraud_detection;
 mod helpers;
+mod liquidity_mining;
 mod oracle;
+mod staking_derivatives;
 mod types;
 mod vouch;
+mod vouch_snapshot;
 
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Vec};
 
@@ -14,9 +18,10 @@ mod withdrawal_queue_test;
 use crate::errors::ContractError;
 use crate::helpers::{config, get_active_loan_record, has_active_loan, require_allowed_token, require_not_paused, require_admin_approval};
 use crate::types::{
-    Config, DataKey, LoanRecord, LoanStatus, QueuedWithdrawal, VouchRecord, VouchSnapshotEntry,
-    DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO, DEFAULT_MAX_VOUCHERS,
-    DEFAULT_MIN_LOAN_AMOUNT, DEFAULT_MIN_VOUCH_AGE_SECS, DEFAULT_SLASH_BPS, DEFAULT_YIELD_BPS,
+    Config, DataKey, LoanRecord, LoanStatus, QueuedWithdrawal, VouchRecord,
+    DEFAULT_LIQUIDITY_MINING_RATE_BPS, DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO,
+    DEFAULT_MAX_VOUCHERS, DEFAULT_MIN_LOAN_AMOUNT, DEFAULT_MIN_VOUCH_AGE_SECS, DEFAULT_SLASH_BPS,
+    DEFAULT_YIELD_BPS,
 };
 
 #[contract]
@@ -62,7 +67,7 @@ impl QuorumCreditContract {
                 grace_period: 0,
                 min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
                 prepayment_penalty_bps: 0,
-                liquidity_mining_rate_bps: 0,
+                liquidity_mining_rate_bps: DEFAULT_LIQUIDITY_MINING_RATE_BPS,
             },
         );
 

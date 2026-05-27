@@ -12,84 +12,67 @@ use crate::types::{
 use soroban_sdk::{panic_with_error, symbol_short, Address, Env, Vec};
 
 /// ------------------------------
-/// Dynamic Yield Calculation
+/// Risk Score Computation (#646)
 /// ------------------------------
-fn calculate_dynamic_yield(
-    env: &Env,
-    borrower: &Address,
-    amount: i128,
-    duration: i128,
-    cfg: &crate::types::Config,
-) -> i128 {
-    // Utilization rate (proxy)
-    let total_loans: i128 = env
-        .storage()
-        .instance()
-        .get(&crate::types::DataKey::TotalLoans)
-        .unwrap_or(1);
-
-    let total_staked: i128 = env
-        .storage()
-        .instance()
-        .get(&crate::types::DataKey::TotalStaked)
-        .unwrap_or(1);
-
-    let utilization = (total_loans * 10_000) / total_staked.max(1);
-
-    // Risk from defaults vs repayments
+/// Computes a risk score in [0, 10_000] from borrower history.
+/// Higher score = higher default risk.
+/// Formula: defaults / (loans + 1) * 10_000, capped at 10_000.
+pub fn compute_risk_score(env: &Env, borrower: &Address) -> i128 {
     let default_count: u32 = env
         .storage()
         .persistent()
-        .get(&crate::types::DataKey::DefaultCount(borrower.clone()))
+        .get(&DataKey::DefaultCount(borrower.clone()))
         .unwrap_or(0);
-
+    let loan_count: u32 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LoanCount(borrower.clone()))
+        .unwrap_or(0);
     let repayment_count: u32 = env
         .storage()
         .persistent()
-        .get(&crate::types::DataKey::RepaymentCount(borrower.clone()))
-        .unwrap_or(1);
+        .get(&DataKey::RepaymentCount(borrower.clone()))
+        .unwrap_or(0);
 
-    let risk_score = (default_count as i128 * 10_000)
-        / (repayment_count as i128 + 1);
+    // Penalise defaults, reward repayments
+    // risk = (defaults * 10_000) / (loans + repayments + 1), capped at 10_000
+    let numerator = (default_count as i128) * 10_000;
+    let denominator = (loan_count as i128) + (repayment_count as i128) + 1;
+    (numerator / denominator).min(10_000)
+}
 
-    // Credit strength (vouch-based proxy)
-    let vouches: Vec<VouchRecord> = env
-        .storage()
-        .persistent()
-        .get(&DataKey::Vouches(borrower.clone()))
-        .unwrap_or(Vec::new(env));
+/// ------------------------------
+/// Dynamic Yield Calculation (#646)
+/// ------------------------------
+/// Adjusts yield_bps upward for high-risk borrowers (up to 2× base)
+/// and downward for low-risk borrowers (down to 0.5× base).
+fn calculate_dynamic_yield(
+    env: &Env,
+    borrower: &Address,
+    cfg: &crate::types::Config,
+) -> i128 {
+    let risk_score = compute_risk_score(env, borrower); // 0..10_000
+    // risk_score == 0   → multiplier = 5_000 (0.5×)
+    // risk_score == 5_000 → multiplier = 10_000 (1.0×)
+    // risk_score == 10_000 → multiplier = 20_000 (2.0×)
+    let multiplier = 5_000 + risk_score + risk_score / 2; // 5_000..20_000
+    let rate = (cfg.yield_bps * multiplier) / 10_000;
+    rate.max(1).min(cfg.yield_bps * 2)
+}
 
-    let mut credit_score: i128 = 0;
-    for v in vouches.iter() {
-        credit_score += v.amount;
-    }
-
-    let credit_factor = credit_score / 1_000;
-
-    // Size & duration adjustments
-    let size_factor = amount / 10_000;
-    let duration_factor = duration / 30;
-
-    // Base rate
-    let mut rate = cfg.base_yield_bps as i128;
-
-    // Weighted adjustments
-    rate += (utilization * cfg.utilization_weight as i128) / 10_000;
-    rate += (risk_score * cfg.risk_weight as i128) / 10_000;
-    rate -= (credit_factor * cfg.credit_weight as i128) / 10_000;
-    rate += size_factor;
-    rate += duration_factor;
-
-    // Safety bounds
-    if rate < cfg.min_yield_bps as i128 {
-        rate = cfg.min_yield_bps as i128;
-    }
-
-    if rate > cfg.max_yield_bps as i128 {
-        rate = cfg.max_yield_bps as i128;
-    }
-
-    rate
+/// ------------------------------
+/// Dynamic Slash Calculation (#646)
+/// ------------------------------
+/// Adjusts slash_bps upward for high-risk borrowers (up to 2× base).
+fn calculate_dynamic_slash(
+    env: &Env,
+    borrower: &Address,
+    cfg: &crate::types::Config,
+) -> i128 {
+    let risk_score = compute_risk_score(env, borrower); // 0..10_000
+    let multiplier = 10_000 + risk_score; // 10_000..20_000
+    let rate = (cfg.slash_bps * multiplier) / 10_000;
+    rate.min(10_000) // slash_bps capped at 100%
 }
 
 /// Register a referrer for a borrower. Must be called before `request_loan`.
@@ -127,7 +110,7 @@ pub fn get_referrer(env: Env, borrower: Address) -> Option<Address> {
         .get(&DataKey::ReferredBy(borrower))
 }
 
-/// Backward-compatible request_loan (no co-borrowers).
+/// Backward-compatible request_loan (no co-borrowers, no syndicate).
 pub fn request_loan(
     env: Env,
     borrower: Address,
@@ -135,12 +118,13 @@ pub fn request_loan(
     threshold: i128,
     loan_purpose: soroban_sdk::String,
     token_addr: Address,
+    syndicate_id: Option<u64>,
 ) -> Result<(), ContractError> {
     borrower.require_auth();
     require_not_paused(&env)?;
     require_not_paused_for(&env, PauseFlag::LoanRequest)?;
     let empty: Vec<Address> = Vec::new(&env);
-    request_loan_internal(env, borrower, amount, threshold, loan_purpose, token_addr, empty, None)
+    request_loan_internal(env, borrower, amount, threshold, loan_purpose, token_addr, empty, syndicate_id)
 }
 
 /// Task 3: Request a loan with co-borrowers who share repayment responsibility.
@@ -176,7 +160,7 @@ fn request_loan_internal(
     loan_purpose: soroban_sdk::String,
     token_addr: Address,
     co_borrowers: Vec<Address>,
-    insurance_provider: Option<Address>,
+    syndicate_id: Option<u64>,
 ) -> Result<(), ContractError> {
     if env
         .storage()
@@ -269,15 +253,10 @@ fn request_loan_internal(
     let loan_id = next_loan_id(&env);
 
     // ------------------------------
-    // DYNAMIC YIELD REPLACEMENT
+    // DYNAMIC YIELD (#646)
     // ------------------------------
-    let yield_bps = calculate_dynamic_yield(
-        &env,
-        &borrower,
-        amount,
-        cfg.loan_duration as i128,
-        &cfg,
-    );
+    let yield_bps = calculate_dynamic_yield(&env, &borrower, &cfg);
+    let dynamic_slash_bps = calculate_dynamic_slash(&env, &borrower, &cfg);
 
     let total_yield = bps_of(amount, yield_bps);
 
@@ -306,6 +285,8 @@ fn request_loan_internal(
             amount,
             amount_repaid: 0,
             total_yield,
+            yield_bps,
+            slash_bps: dynamic_slash_bps,
             status: LoanStatus::Active,
             created_at: now,
             disbursement_timestamp: now,
@@ -314,11 +295,25 @@ fn request_loan_internal(
             loan_purpose,
             loan_category: loan_category.clone(),
             token_address: token_addr.clone(),
-            insurance_provider,
+            syndicate_id,
         },
     );
 
     extend_ttl(&env, &DataKey::Loan(loan_id));
+
+    // #647: Track loan in syndicate if syndicate_id provided
+    if let Some(sid) = syndicate_id {
+        let mut syndicate_loans: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Syndicate(sid))
+            .unwrap_or(Vec::new(&env));
+        syndicate_loans.push_back(loan_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Syndicate(sid), &syndicate_loans);
+        extend_ttl(&env, &DataKey::Syndicate(sid));
+    }
 
     // Task 4: Track loan by category
     let mut category_loans: Vec<u64> = env
@@ -542,146 +537,50 @@ pub fn get_loans_by_category(env: Env, category: LoanCategory) -> Vec<u64> {
         .unwrap_or(Vec::new(&env))
 }
 
-// #645: Loan Restructuring — borrower requests a restructure (extend deadline / reduce amount)
-// Vouchers must approve; once all current vouchers approve, the loan is updated.
-pub fn restructure_loan(
-    env: Env,
-    borrower: Address,
-    new_deadline: u64,
-    new_amount: i128,
-) -> Result<(), ContractError> {
-    borrower.require_auth();
-    require_not_paused(&env)?;
-
-    let loan = get_active_loan_record(&env, &borrower)?;
-    validate_loan_active(&loan)?;
-
-    // new_deadline must be in the future and after current deadline
-    assert!(
-        new_deadline > loan.deadline,
-        "new_deadline must be after current deadline"
-    );
-    // new_amount must be 0 (no change) or positive and <= outstanding
-    if new_amount != 0 {
-        let outstanding = loan.amount + loan.total_yield - loan.amount_repaid;
-        assert!(
-            new_amount > 0 && new_amount <= outstanding,
-            "new_amount must be positive and not exceed outstanding balance"
-        );
-    }
-
-    // Reject if a restructure is already pending
-    if env
-        .storage()
-        .persistent()
-        .has(&DataKey::RestructureRequest(borrower.clone()))
-    {
-        return Err(ContractError::RestructureAlreadyPending);
-    }
-
-    let request = crate::types::RestructureRequest {
-        borrower: borrower.clone(),
-        new_deadline,
-        new_amount,
-        requested_at: env.ledger().timestamp(),
-        approvals: Vec::new(&env),
-    };
-
+/// #647: Get all loan IDs belonging to a syndicate.
+pub fn get_syndicate_loans(env: Env, syndicate_id: u64) -> Vec<u64> {
     env.storage()
         .persistent()
-        .set(&DataKey::RestructureRequest(borrower.clone()), &request);
-    extend_ttl(&env, &DataKey::RestructureRequest(borrower.clone()));
-
-    env.events().publish(
-        (symbol_short!("loan"), symbol_short!("restruct")),
-        (borrower, new_deadline, new_amount),
-    );
-
-    Ok(())
+        .get(&DataKey::Syndicate(syndicate_id))
+        .unwrap_or(Vec::new(&env))
 }
 
-// #645: Voucher approves a pending restructure request.
-// Once all vouchers approve, the loan deadline (and optionally amount) is updated.
-pub fn approve_restructure(
-    env: Env,
-    voucher: Address,
-    borrower: Address,
-) -> Result<(), ContractError> {
-    voucher.require_auth();
-    require_not_paused(&env)?;
-
-    let mut request: crate::types::RestructureRequest = env
+/// #647: Create a new syndicate and return its ID.
+/// Any caller may create a syndicate; loans are associated at request_loan time.
+pub fn create_syndicate(env: Env) -> u64 {
+    let id: u64 = env
         .storage()
         .persistent()
-        .get(&DataKey::RestructureRequest(borrower.clone()))
-        .ok_or(ContractError::RestructureRequestNotFound)?;
-
-    // Verify voucher has a vouch for this borrower
-    let vouches: Vec<VouchRecord> = env
-        .storage()
-        .persistent()
-        .get(&DataKey::Vouches(borrower.clone()))
-        .unwrap_or(Vec::new(&env));
-
-    let is_voucher = vouches.iter().any(|v| v.voucher == voucher);
-    if !is_voucher {
-        return Err(ContractError::UnauthorizedCaller);
-    }
-
-    // Prevent double approval
-    if request.approvals.iter().any(|a| a == voucher) {
-        return Err(ContractError::AlreadyVoted);
-    }
-
-    request.approvals.push_back(voucher.clone());
-
-    // Check if all vouchers have approved
-    let all_approved = vouches.iter().all(|v| request.approvals.iter().any(|a| a == v.voucher));
-
-    if all_approved {
-        // Apply the restructure
-        let mut loan = get_active_loan_record(&env, &borrower)?;
-        loan.deadline = request.new_deadline;
-        if request.new_amount > 0 {
-            // Reduce the outstanding amount by adjusting total_yield (forgiveness)
-            let outstanding = loan.amount + loan.total_yield - loan.amount_repaid;
-            let forgiven = outstanding - request.new_amount;
-            if forgiven > 0 && forgiven <= loan.total_yield {
-                loan.total_yield -= forgiven;
-            }
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Loan(loan.id), &loan);
-        extend_ttl(&env, &DataKey::Loan(loan.id));
-
-        // Remove the restructure request
-        env.storage()
-            .persistent()
-            .remove(&DataKey::RestructureRequest(borrower.clone()));
-
-        env.events().publish(
-            (symbol_short!("loan"), symbol_short!("rst_done")),
-            (borrower, loan.deadline),
-        );
-    } else {
-        env.storage()
-            .persistent()
-            .set(&DataKey::RestructureRequest(borrower.clone()), &request);
-        extend_ttl(&env, &DataKey::RestructureRequest(borrower.clone()));
-    }
-
-    Ok(())
-}
-
-// #645: Get pending restructure request for a borrower
-pub fn get_restructure_request(
-    env: Env,
-    borrower: Address,
-) -> Option<crate::types::RestructureRequest> {
+        .get(&DataKey::SyndicateCounter)
+        .unwrap_or(0u64)
+        + 1;
     env.storage()
         .persistent()
-        .get(&DataKey::RestructureRequest(borrower))
+        .set(&DataKey::SyndicateCounter, &id);
+    extend_ttl(&env, &DataKey::SyndicateCounter);
+    // Initialise empty loan list so the key exists
+    env.storage()
+        .persistent()
+        .set(&DataKey::Syndicate(id), &Vec::<u64>::new(&env));
+    extend_ttl(&env, &DataKey::Syndicate(id));
+    id
+}
+
+/// #646: Get the dynamic yield rate (bps) that would apply to a borrower right now.
+pub fn get_dynamic_yield_bps(env: Env, borrower: Address) -> i128 {
+    let cfg = config(&env);
+    calculate_dynamic_yield(&env, &borrower, &cfg)
+}
+
+/// #646: Get the dynamic slash rate (bps) that would apply to a borrower right now.
+pub fn get_dynamic_slash_bps(env: Env, borrower: Address) -> i128 {
+    let cfg = config(&env);
+    calculate_dynamic_slash(&env, &borrower, &cfg)
+}
+
+/// #646: Get the risk score for a borrower (0 = no risk, 10_000 = max risk).
+pub fn get_risk_score(env: Env, borrower: Address) -> i128 {
+    compute_risk_score(&env, &borrower)
 }
 
 // Task 2: Large Loan Multi-Signature - Require admin approval for large loans
@@ -847,6 +746,8 @@ pub fn execute_large_loan(env: Env, borrower: Address) -> Result<(), ContractErr
             amount: request.amount,
             amount_repaid: 0,
             total_yield,
+            yield_bps,
+            slash_bps: cfg.slash_bps,
             status: LoanStatus::Active,
             created_at: now,
             disbursement_timestamp: now,
@@ -855,7 +756,7 @@ pub fn execute_large_loan(env: Env, borrower: Address) -> Result<(), ContractErr
             loan_purpose: request.loan_purpose,
             loan_category: request.loan_category,
             token_address: request.token_address.clone(),
-            insurance_provider: None,
+            syndicate_id: None,
         },
     );
     extend_ttl(&env, &DataKey::Loan(loan_id));
