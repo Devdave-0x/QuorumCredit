@@ -4,8 +4,11 @@ use crate::errors::ContractError;
 use crate::helpers::{
     has_active_loan, require_allowed_token, require_not_paused, require_positive_amount,
 };
-use crate::types::{DataKey, VouchRecord, VouchHistoryEntry};
-use soroban_sdk::{token, Address, Env, Vec};
+use crate::types::{
+    DataKey, QueuedWithdrawal, VouchHistoryEntry, VouchRecord,
+    PARTIAL_WITHDRAWAL_MAX_BPS, PARTIAL_WITHDRAWAL_PENALTY_BPS, BPS_DENOMINATOR,
+};
+use soroban_sdk::{symbol_short, token, Address, Env, Vec};
 
 struct VouchConfig {
     whitelist_enabled: bool,
@@ -17,11 +20,25 @@ struct VouchConfig {
 impl VouchConfig {
     fn load(env: &Env) -> Self {
         VouchConfig {
-            whitelist_enabled: env.storage().instance().get(&DataKey::WhitelistEnabled).unwrap_or(false),
-            min_stake: env.storage().instance().get(&DataKey::MinStake).unwrap_or(0),
-            vouch_cooldown_secs: env.storage().instance().get(&DataKey::VouchCooldownSecs)
+            whitelist_enabled: env
+                .storage()
+                .instance()
+                .get(&DataKey::WhitelistEnabled)
+                .unwrap_or(false),
+            min_stake: env
+                .storage()
+                .instance()
+                .get(&DataKey::MinStake)
+                .unwrap_or(0),
+            vouch_cooldown_secs: env
+                .storage()
+                .instance()
+                .get(&DataKey::VouchCooldownSecs)
                 .unwrap_or(crate::types::DEFAULT_VOUCH_COOLDOWN_SECS),
-            max_vouchers_per_borrower: env.storage().instance().get(&DataKey::MaxVouchersPerBorrower)
+            max_vouchers_per_borrower: env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxVouchersPerBorrower)
                 .unwrap_or(crate::types::DEFAULT_MAX_VOUCHERS_PER_BORROWER),
         }
     }
@@ -54,12 +71,19 @@ fn validate_vouch<'a>(
         return Err(ContractError::SelfVouchNotAllowed);
     }
 
-    if env.storage().persistent().get::<DataKey, bool>(&DataKey::Blacklisted(borrower.clone())).unwrap_or(false) {
+    if env
+        .storage()
+        .persistent()
+        .get::<DataKey, bool>(&DataKey::Blacklisted(borrower.clone()))
+        .unwrap_or(false)
+    {
         return Err(ContractError::Blacklisted);
     }
 
     if cfg.whitelist_enabled {
-        let is_whitelisted: bool = env.storage().persistent()
+        let is_whitelisted: bool = env
+            .storage()
+            .persistent()
             .get(&DataKey::VoucherWhitelist(voucher.clone()))
             .unwrap_or(false);
         if !is_whitelisted {
@@ -74,7 +98,9 @@ fn validate_vouch<'a>(
     }
 
     if cfg.vouch_cooldown_secs > 0 {
-        let last: u64 = env.storage().persistent()
+        let last: u64 = env
+            .storage()
+            .persistent()
             .get(&DataKey::LastVouchTimestamp(voucher.clone()))
             .unwrap_or(0);
         let now = env.ledger().timestamp();
@@ -83,7 +109,9 @@ fn validate_vouch<'a>(
         }
     }
 
-    let vouches: Vec<VouchRecord> = env.storage().persistent()
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
         .get(&DataKey::Vouches(borrower.clone()))
         .unwrap_or(Vec::new(env));
 
@@ -119,23 +147,27 @@ fn commit_vouch(
 ) -> Result<(), ContractError> {
     let contract = env.current_contract_address();
 
-    // ✅ SECURITY FIX
     let before = token_client.balance(&contract);
     token_client.transfer(&voucher, &contract, &stake);
     let after = token_client.balance(&contract);
 
-    let received = after.checked_sub(before).ok_or(ContractError::StakeOverflow)?;
+    let received = after
+        .checked_sub(before)
+        .ok_or(ContractError::StakeOverflow)?;
 
     if received != stake {
         return Err(ContractError::InsufficientFunds);
     }
 
-    let mut history: Vec<Address> = env.storage().persistent()
+    let mut history: Vec<Address> = env
+        .storage()
+        .persistent()
         .get(&DataKey::VoucherHistory(voucher.clone()))
         .unwrap_or(Vec::new(env));
     history.push_back(borrower.clone());
-
-    env.storage().persistent().set(&DataKey::VoucherHistory(voucher.clone()), &history);
+    env.storage()
+        .persistent()
+        .set(&DataKey::VoucherHistory(voucher.clone()), &history);
 
     let timestamp = env.ledger().timestamp();
 
@@ -148,10 +180,18 @@ fn commit_vouch(
         delegate: None,
     });
 
-    env.storage().persistent().set(&DataKey::Vouches(borrower.clone()), &vouches);
+    env.storage()
+        .persistent()
+        .set(&DataKey::Vouches(borrower.clone()), &vouches);
 
-    let mut vouch_history: Vec<VouchHistoryEntry> = env.storage().persistent()
-        .get(&DataKey::VouchHistory(borrower.clone(), voucher.clone(), token.clone()))
+    let mut vouch_history: Vec<VouchHistoryEntry> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::VouchHistory(
+            borrower.clone(),
+            voucher.clone(),
+            token.clone(),
+        ))
         .unwrap_or(Vec::new(env));
 
     vouch_history.push_back(VouchHistoryEntry {
@@ -171,6 +211,11 @@ fn commit_vouch(
         &timestamp,
     );
 
+    env.events().publish(
+        (symbol_short!("vouch"), symbol_short!("create")),
+        (voucher, borrower, stake, token),
+    );
+
     Ok(())
 }
 
@@ -182,10 +227,47 @@ fn do_vouch(
     stake: i128,
     token: Address,
 ) -> Result<(), ContractError> {
-    let (token_client, vouches) =
-        validate_vouch(env, cfg, &voucher, &borrower, stake, &token)?;
-
+    let (token_client, vouches) = validate_vouch(env, cfg, &voucher, &borrower, stake, &token)?;
     commit_vouch(env, &token_client, voucher, borrower, stake, token, vouches)
+}
+
+pub fn batch_vouch(
+    env: Env,
+    voucher: Address,
+    borrowers: Vec<Address>,
+    stakes: Vec<i128>,
+    token: Address,
+) -> Result<(), ContractError> {
+    voucher.require_auth();
+    require_not_paused(&env)?;
+
+    if borrowers.is_empty() || borrowers.len() != stakes.len() {
+        return Err(ContractError::InsufficientFunds);
+    }
+
+    let cfg = VouchConfig::load(&env);
+
+    // Phase 1: validate all — fail fast before any state mutation
+    for i in 0..borrowers.len() {
+        let borrower = borrowers.get(i).unwrap();
+        let stake = stakes.get(i).unwrap();
+        validate_vouch(&env, &cfg, &voucher, &borrower, stake, &token)?;
+    }
+
+    // Phase 2: commit all — only reached if all validations passed
+    let token_client = require_allowed_token(&env, &token)?;
+    for i in 0..borrowers.len() {
+        let borrower = borrowers.get(i).unwrap();
+        let stake = stakes.get(i).unwrap();
+        let vouches: Vec<VouchRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vouches(borrower.clone()))
+            .unwrap_or(Vec::new(&env));
+        commit_vouch(&env, &token_client, voucher.clone(), borrower, stake, token.clone(), vouches)?;
+    }
+
+    Ok(())
 }
 
 pub fn increase_stake(
@@ -198,52 +280,463 @@ pub fn increase_stake(
     require_not_paused(&env)?;
     require_positive_amount(&env, additional)?;
 
-    let mut vouches: Vec<VouchRecord> = env.storage().persistent()
+    let mut vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
         .get(&DataKey::Vouches(borrower.clone()))
-        .expect("vouch not found");
+        .ok_or(ContractError::NoVouchesForBorrower)?;
 
-    let idx = vouches.iter()
+    let idx = vouches
+        .iter()
         .position(|v| v.voucher == voucher)
-        .expect("vouch not found") as u32;
+        .ok_or(ContractError::VoucherNotFound)? as u32;
 
     let mut vouch_rec = vouches.get(idx).unwrap();
 
-    // Issue #599: If there is an active loan, queue a timelocked withdrawal instead of
-    // immediately reducing stake. This prevents vouchers from rug-pulling mid-loan.
     if has_active_loan(&env, &borrower) {
-        let now = env.ledger().timestamp();
-        let _unlock_at = now + crate::types::DECREASE_STAKE_TIMELOCK;
-        env.storage().persistent().set(
-            &DataKey::PendingWithdrawal(voucher.clone(), borrower.clone()),
-            &crate::types::WithdrawalRequest {
-                voucher: voucher.clone(),
-                borrower: borrower.clone(),
-                token: vouch_rec.token.clone(),
-                requested_at: now,
-            },
-        );
-        return Ok(());
+        return Err(ContractError::ActiveLoanExists);
     }
 
     let token_client = require_allowed_token(&env, &vouch_rec.token)?;
     let contract = env.current_contract_address();
 
-    // ✅ SECURITY FIX
     let before = token_client.balance(&contract);
     token_client.transfer(&voucher, &contract, &additional);
     let after = token_client.balance(&contract);
 
-    let received = after.checked_sub(before).ok_or(ContractError::StakeOverflow)?;
+    let received = after
+        .checked_sub(before)
+        .ok_or(ContractError::StakeOverflow)?;
     if received != additional {
         return Err(ContractError::InsufficientFunds);
     }
 
-    vouch_rec.stake = vouch_rec.stake.checked_add(additional)
+    vouch_rec.stake = vouch_rec
+        .stake
+        .checked_add(additional)
         .ok_or(ContractError::StakeOverflow)?;
 
-    vouches.set(idx, vouch_rec.clone());
+    vouches.set(idx, vouch_rec);
+    env.storage()
+        .persistent()
+        .set(&DataKey::Vouches(borrower.clone()), &vouches);
 
-    env.storage().persistent().set(&DataKey::Vouches(borrower.clone()), &vouches);
+    env.events().publish(
+        (symbol_short!("vouch"), symbol_short!("increase")),
+        (voucher, borrower, additional),
+    );
 
     Ok(())
+}
+
+/// Decrease stake for an existing vouch.
+/// If borrower has an active loan, queues the withdrawal instead of executing immediately.
+pub fn decrease_stake(
+    env: Env,
+    voucher: Address,
+    borrower: Address,
+    amount: i128,
+) -> Result<(), ContractError> {
+    voucher.require_auth();
+    require_not_paused(&env)?;
+    require_positive_amount(&env, amount)?;
+
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower.clone()))
+        .ok_or(ContractError::NoVouchesForBorrower)?;
+
+    let idx = vouches
+        .iter()
+        .position(|v| v.voucher == voucher)
+        .ok_or(ContractError::VoucherNotFound)? as u32;
+
+    let vouch_rec = vouches.get(idx).unwrap();
+
+    if amount > vouch_rec.stake {
+        return Err(ContractError::InsufficientFunds);
+    }
+
+    // If active loan: queue the withdrawal
+    if has_active_loan(&env, &borrower) {
+        return queue_withdrawal_internal(&env, voucher, borrower, vouch_rec.token, false, 0);
+    }
+
+    // No active loan: execute immediately
+    let token_client = require_allowed_token(&env, &vouch_rec.token)?;
+    let mut vouches_mut = vouches;
+
+    if amount == vouch_rec.stake {
+        // Full withdrawal: remove the vouch
+        vouches_mut.remove(idx);
+    } else {
+        let mut updated = vouch_rec.clone();
+        updated.stake -= amount;
+        vouches_mut.set(idx, updated);
+    }
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::Vouches(borrower.clone()), &vouches_mut);
+
+    token_client.transfer(&env.current_contract_address(), &voucher, &amount);
+
+    env.events().publish(
+        (symbol_short!("vouch"), symbol_short!("decrease")),
+        (voucher, borrower, amount),
+    );
+
+    Ok(())
+}
+
+/// Fully withdraw a vouch and return stake to voucher.
+/// If borrower has an active loan, queues the withdrawal instead.
+pub fn withdraw_vouch(
+    env: Env,
+    voucher: Address,
+    borrower: Address,
+) -> Result<(), ContractError> {
+    voucher.require_auth();
+    require_not_paused(&env)?;
+
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower.clone()))
+        .ok_or(ContractError::NoVouchesForBorrower)?;
+
+    let idx = vouches
+        .iter()
+        .position(|v| v.voucher == voucher)
+        .ok_or(ContractError::VoucherNotFound)? as u32;
+
+    let vouch_rec = vouches.get(idx).unwrap();
+
+    // If active loan: queue the withdrawal
+    if has_active_loan(&env, &borrower) {
+        return queue_withdrawal_internal(&env, voucher, borrower, vouch_rec.token, false, 0);
+    }
+
+    // No active loan: execute immediately
+    let token_client = require_allowed_token(&env, &vouch_rec.token)?;
+    let stake = vouch_rec.stake;
+    let mut vouches_mut = vouches;
+    vouches_mut.remove(idx);
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::Vouches(borrower.clone()), &vouches_mut);
+
+    token_client.transfer(&env.current_contract_address(), &voucher, &stake);
+
+    env.events().publish(
+        (symbol_short!("vouch"), symbol_short!("withdraw")),
+        (voucher, borrower, stake),
+    );
+
+    Ok(())
+}
+
+/// Request a withdrawal during an active loan.
+/// The request is queued and processed when the loan is repaid or slashed.
+/// Optionally pay a priority fee (in stroops) to be processed first.
+pub fn request_withdrawal(
+    env: Env,
+    voucher: Address,
+    borrower: Address,
+    priority_fee: i128,
+) -> Result<(), ContractError> {
+    voucher.require_auth();
+    require_not_paused(&env)?;
+
+    if priority_fee < 0 {
+        return Err(ContractError::InvalidAmount);
+    }
+
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower.clone()))
+        .ok_or(ContractError::NoVouchesForBorrower)?;
+
+    let idx = vouches
+        .iter()
+        .position(|v| v.voucher == voucher)
+        .ok_or(ContractError::VoucherNotFound)? as u32;
+
+    let vouch_rec = vouches.get(idx).unwrap();
+
+    if !has_active_loan(&env, &borrower) {
+        // No active loan — execute withdrawal immediately (auth already checked above)
+        let token_client = require_allowed_token(&env, &vouch_rec.token)?;
+        let stake = vouch_rec.stake;
+        let mut vouches_mut = vouches;
+        vouches_mut.remove(idx);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Vouches(borrower.clone()), &vouches_mut);
+        token_client.transfer(&env.current_contract_address(), &voucher, &stake);
+        env.events().publish(
+            (symbol_short!("vouch"), symbol_short!("withdraw")),
+            (voucher, borrower, stake),
+        );
+        return Ok(());
+    }
+
+    // Collect priority fee from voucher if specified
+    if priority_fee > 0 {
+        let token_client = require_allowed_token(&env, &vouch_rec.token)?;
+        token_client.transfer(&voucher, &env.current_contract_address(), &priority_fee);
+    }
+
+    queue_withdrawal_internal(&env, voucher, borrower, vouch_rec.token, false, priority_fee)
+}
+
+/// Partial withdrawal: withdraw up to 50% of stake during an active loan, with a penalty.
+/// The penalty (default 10%) is distributed to remaining vouchers.
+pub fn partial_withdraw(
+    env: Env,
+    voucher: Address,
+    borrower: Address,
+) -> Result<(), ContractError> {
+    voucher.require_auth();
+    require_not_paused(&env)?;
+
+    let mut vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower.clone()))
+        .ok_or(ContractError::NoVouchesForBorrower)?;
+
+    let idx = vouches
+        .iter()
+        .position(|v| v.voucher == voucher)
+        .ok_or(ContractError::VoucherNotFound)? as u32;
+
+    let vouch_rec = vouches.get(idx).unwrap();
+
+    if !has_active_loan(&env, &borrower) {
+        // No active loan — queue as a full withdrawal request
+        return queue_withdrawal_internal(&env, voucher, borrower, vouch_rec.token, true, 0);
+    }
+
+    // Calculate max withdrawable: 50% of stake
+    let max_withdraw = vouch_rec.stake * PARTIAL_WITHDRAWAL_MAX_BPS / BPS_DENOMINATOR;
+    if max_withdraw <= 0 {
+        return Err(ContractError::InsufficientFunds);
+    }
+
+    // Apply penalty: 10% of the withdrawn amount
+    let penalty = max_withdraw * PARTIAL_WITHDRAWAL_PENALTY_BPS / BPS_DENOMINATOR;
+    let net_payout = max_withdraw - penalty;
+
+    let token_client = require_allowed_token(&env, &vouch_rec.token)?;
+    let contract = env.current_contract_address();
+
+    // Reduce the voucher's stake by the withdrawn amount
+    let mut updated = vouch_rec.clone();
+    updated.stake -= max_withdraw;
+    vouches.set(idx, updated);
+    env.storage()
+        .persistent()
+        .set(&DataKey::Vouches(borrower.clone()), &vouches);
+
+    // Pay net amount to voucher
+    token_client.transfer(&contract, &voucher, &net_payout);
+
+    // Distribute penalty to remaining vouchers proportionally
+    distribute_penalty(&env, &token_client, &borrower, &voucher, penalty, &vouches);
+
+    env.events().publish(
+        (symbol_short!("vouch"), symbol_short!("partial")),
+        (voucher, borrower, net_payout, penalty),
+    );
+
+    Ok(())
+}
+
+/// Process the withdrawal queue for a borrower after loan resolution (repay or slash).
+/// Called internally by the loan module after repay/slash completes.
+pub fn process_withdrawal_queue(env: &Env, borrower: &Address) {
+    let queue: Vec<QueuedWithdrawal> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WithdrawalQueue(borrower.clone()))
+        .unwrap_or(Vec::new(env));
+
+    if queue.is_empty() {
+        return;
+    }
+
+    let vouches: Vec<VouchRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Vouches(borrower.clone()))
+        .unwrap_or(Vec::new(env));
+
+    // Sort by priority fee descending (higher fee = processed first)
+    // We do a simple insertion-sort since queue is typically small
+    let mut sorted_queue = queue.clone();
+    let n = sorted_queue.len();
+    for i in 1..n {
+        for j in (1..=i).rev() {
+            let a = sorted_queue.get(j - 1).unwrap();
+            let b = sorted_queue.get(j).unwrap();
+            if b.priority_fee > a.priority_fee {
+                sorted_queue.set(j - 1, b.clone());
+                sorted_queue.set(j, a.clone());
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Collect total priority fees to distribute to non-withdrawing vouchers
+    let total_priority_fees: i128 = sorted_queue.iter().map(|q| q.priority_fee).sum();
+
+    // Process each queued withdrawal
+    for queued in sorted_queue.iter() {
+        let idx_opt = vouches.iter().position(|v| v.voucher == queued.voucher);
+        if let Some(_idx) = idx_opt {
+            // Stake was already zeroed out during slash or will be returned via repay flow.
+            // Emit event so off-chain indexers can track the queue processing.
+            env.events().publish(
+                (symbol_short!("wq"), symbol_short!("processed")),
+                (queued.voucher.clone(), borrower.clone()),
+            );
+        }
+    }
+
+    // Distribute priority fees to remaining (non-withdrawing) vouchers
+    if total_priority_fees > 0 {
+        let withdrawing_vouchers: Vec<Address> = {
+            let mut v: Vec<Address> = Vec::new(env);
+            for q in sorted_queue.iter() {
+                v.push_back(q.voucher.clone());
+            }
+            v
+        };
+
+        let remaining_vouches: Vec<VouchRecord> = {
+            let mut v: Vec<VouchRecord> = Vec::new(env);
+            for vr in vouches.iter() {
+                let is_withdrawing = withdrawing_vouchers.iter().any(|w| w == vr.voucher);
+                if !is_withdrawing {
+                    v.push_back(vr);
+                }
+            }
+            v
+        };
+
+        let total_remaining_stake: i128 = remaining_vouches.iter().map(|v| v.stake).sum();
+
+        if total_remaining_stake > 0 {
+            // Use the first queued withdrawal's token for fee distribution
+            if let Some(first) = sorted_queue.get(0) {
+                if let Ok(token_client) = require_allowed_token(env, &first.token) {
+                    let contract = env.current_contract_address();
+                    for vr in remaining_vouches.iter() {
+                        let share = total_priority_fees * vr.stake / total_remaining_stake;
+                        if share > 0 {
+                            token_client.transfer(&contract, &vr.voucher, &share);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clear the queue
+    env.storage()
+        .persistent()
+        .remove(&DataKey::WithdrawalQueue(borrower.clone()));
+}
+
+/// Get the withdrawal queue for a borrower.
+pub fn get_withdrawal_queue(env: Env, borrower: Address) -> Vec<QueuedWithdrawal> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::WithdrawalQueue(borrower))
+        .unwrap_or(Vec::new(&env))
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn queue_withdrawal_internal(
+    env: &Env,
+    voucher: Address,
+    borrower: Address,
+    token: Address,
+    partial: bool,
+    priority_fee: i128,
+) -> Result<(), ContractError> {
+    let mut queue: Vec<QueuedWithdrawal> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::WithdrawalQueue(borrower.clone()))
+        .unwrap_or(Vec::new(env));
+
+    // Prevent duplicate queue entries for the same voucher
+    for q in queue.iter() {
+        if q.voucher == voucher {
+            return Err(ContractError::WithdrawalAlreadyQueued);
+        }
+    }
+
+    queue.push_back(QueuedWithdrawal {
+        voucher: voucher.clone(),
+        token,
+        requested_at: env.ledger().timestamp(),
+        partial,
+        priority_fee,
+    });
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::WithdrawalQueue(borrower.clone()), &queue);
+
+    env.events().publish(
+        (symbol_short!("wq"), symbol_short!("queued")),
+        (voucher, borrower),
+    );
+
+    Ok(())
+}
+
+/// Distribute penalty amount proportionally to all vouchers except the withdrawing one.
+fn distribute_penalty(
+    env: &Env,
+    token_client: &token::Client,
+    _borrower: &Address,
+    withdrawing_voucher: &Address,
+    penalty: i128,
+    vouches: &Vec<VouchRecord>,
+) {
+    if penalty <= 0 {
+        return;
+    }
+
+    let remaining: Vec<VouchRecord> = {
+        let mut v: Vec<VouchRecord> = Vec::new(env);
+        for vr in vouches.iter() {
+            if vr.voucher != *withdrawing_voucher {
+                v.push_back(vr);
+            }
+        }
+        v
+    };
+
+    let total_stake: i128 = remaining.iter().map(|v| v.stake).sum();
+    if total_stake <= 0 {
+        return;
+    }
+
+    let contract = env.current_contract_address();
+    for vr in remaining.iter() {
+        let share = penalty * vr.stake / total_stake;
+        if share > 0 {
+            token_client.transfer(&contract, &vr.voucher, &share);
+        }
+    }
 }

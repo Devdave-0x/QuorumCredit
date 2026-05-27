@@ -51,4 +51,10 @@ pub enum ContractError {
     InsuranceClaimAlreadyMade = 44,
     /// Basis points value is invalid (must be 0–10000).
     InvalidBps = 45,
+    /// Withdrawal request already queued for this voucher/borrower pair.
+    WithdrawalAlreadyQueued = 46,
+    /// No queued withdrawal found for this voucher/borrower pair.
+    WithdrawalNotQueued = 47,
+    /// Partial withdrawal amount exceeds the 50% cap.
+    PartialWithdrawalExceedsCap = 48,
 }
