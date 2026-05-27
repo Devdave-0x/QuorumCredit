@@ -93,6 +93,7 @@ pub fn request_loan(
         reminder_sent: false,
         risk_score: 0,
         deferment_periods: 0,
+        maturity_date: None,
     };
 
     env.storage().persistent().set(&DataKey::Loan(loan_id), &loan);
@@ -389,4 +390,32 @@ pub fn check_acceleration(env: Env, borrower: Address) -> Result<(), ContractErr
     );
 
     Err(ContractError::LoanAccelerated)
+}
+
+/// Set a custom maturity date for an active loan. Admin-only.
+/// The maturity_date must be in the future and after the current deadline.
+pub fn set_maturity_date(
+    env: Env,
+    admin_signers: Vec<Address>,
+    borrower: Address,
+    maturity_date: u64,
+) -> Result<(), ContractError> {
+    require_admin_approval(&env, &admin_signers)?;
+
+    let now = env.ledger().timestamp();
+    if maturity_date <= now {
+        return Err(ContractError::InvalidAmount);
+    }
+
+    let mut loan = get_active_loan_record(&env, &borrower)?;
+    loan.maturity_date = Some(maturity_date);
+
+    env.storage().persistent().set(&DataKey::Loan(loan.id), &loan);
+
+    env.events().publish(
+        (symbol_short!(\"loan\"), symbol_short!(\"maturity\")),
+        (borrower, maturity_date),
+    );
+
+    Ok(())
 }

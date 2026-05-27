@@ -1488,6 +1488,17 @@ impl QuorumCreditContract {
         loan::check_acceleration(env, borrower)
     }
 
+    /// Set a custom maturity date for an active loan. Admin-only.
+    /// Overrides the default deadline computed from loan_duration.
+    pub fn set_maturity_date(
+        env: Env,
+        admin_signers: Vec<Address>,
+        borrower: Address,
+        maturity_date: u64,
+    ) -> Result<(), ContractError> {
+        loan::set_maturity_date(env, admin_signers, borrower, maturity_date)
+    }
+
     /// Request a loan extension. Requires voucher approval.
     ///
     /// The borrower requests an extension of their active loan deadline. Vouchers must

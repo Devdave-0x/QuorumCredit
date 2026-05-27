@@ -229,6 +229,7 @@ impl QuorumCreditContract {
             reminder_sent: false,
             risk_score: 0,
             deferment_periods: 0,
+            maturity_date: None,
         };
 
         env.storage()

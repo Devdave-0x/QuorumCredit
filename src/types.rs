@@ -287,6 +287,9 @@ pub struct LoanRecord {
     pub risk_score: u32,
     /// Number of payment deferment periods used on this loan.
     pub deferment_periods: u32,
+    /// Optional custom maturity date (ledger timestamp). When set, overrides the
+    /// default `deadline` computed from `loan_duration`. `None` means use `deadline`.
+    pub maturity_date: Option<u64>,
 }
 
 /// A single payment event recorded against a loan.
