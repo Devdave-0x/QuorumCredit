@@ -64,6 +64,7 @@ impl QuorumCreditContract {
                 min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
                 prepayment_penalty_bps: 0,
                 liquidity_mining_rate_bps: DEFAULT_LIQUIDITY_MINING_RATE_BPS,
+                dynamic_slash_threshold: DEFAULT_DYNAMIC_SLASH_THRESHOLD,
             },
         );
 
@@ -683,6 +684,32 @@ impl QuorumCreditContract {
         slash_bps: Option<i128>,
     ) {
         admin::update_config(env, admin_signers, yield_bps, slash_bps)
+    }
+
+    /// Toggle dynamic slash threshold on/off.
+    /// When enabled, slash penalties adjust based on protocol health.
+    ///
+    /// # Arguments
+    /// * `admin_signers` - Vector of admin addresses (must meet threshold)
+    /// * `enabled` - Whether to enable dynamic slash threshold
+    ///
+    /// # Panics
+    /// * If admin approval is insufficient
+    pub fn set_dynamic_slash_threshold(
+        env: Env,
+        admin_signers: Vec<Address>,
+        enabled: bool,
+    ) {
+        admin::set_dynamic_slash_threshold(env, admin_signers, enabled)
+    }
+
+    /// Get the current effective slash threshold (either static or dynamic).
+    /// This function can be called by anyone to see what slash rate would be applied.
+    ///
+    /// # Returns
+    /// * Current effective slash threshold in basis points
+    pub fn get_effective_slash_threshold(env: Env) -> i128 {
+        admin::get_effective_slash_threshold(env)
     }
 
     /// Set the reputation NFT contract address.

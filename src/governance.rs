@@ -203,6 +203,9 @@ fn execute_slash(env: &Env, borrower: &Address) -> Result<(), ContractError> {
     }
     let loan_token = soroban_sdk::token::Client::new(env, &loan.token_address);
 
+    // Calculate dynamic slash threshold based on protocol health
+    let effective_slash_bps = crate::helpers::calculate_dynamic_slash_threshold(env);
+
     // Issue #551: Calculate total stake for proportional slashing
     let mut total_loan_token_stake: i128 = 0;
     for v in vouches.iter() {
@@ -228,8 +231,8 @@ fn execute_slash(env: &Env, borrower: &Address) -> Result<(), ContractError> {
             0
         };
         
-        // Slash amount is proportional to the voucher's share of the loan
-        let slash_amount = loan.amount * voucher_share_bps / BPS_DENOMINATOR * cfg.slash_bps / BPS_DENOMINATOR;
+        // Slash amount uses dynamic threshold instead of static cfg.slash_bps
+        let slash_amount = loan.amount * voucher_share_bps / BPS_DENOMINATOR * effective_slash_bps / BPS_DENOMINATOR;
         let remaining = v.stake - slash_amount;
         total_slashed += slash_amount;
 
@@ -287,12 +290,13 @@ fn execute_slash(env: &Env, borrower: &Address) -> Result<(), ContractError> {
     } else {
         env.storage()
             .persistent()
-            .set(&DataKey::Vouches(borrower.clone()), &remaining_vouches);
+        .set(&DataKey::Vouches(borrower.clone()), &remaining_vouches);
     }
 
+    // Emit event with both static and dynamic slash rates for transparency
     env.events().publish(
         (symbol_short!("gov"), symbol_short!("slashed")),
-        (borrower.clone(), total_slashed),
+        (borrower.clone(), total_slashed, cfg.slash_bps, effective_slash_bps),
     );
 
     // Log slash audit record (Issue #536)

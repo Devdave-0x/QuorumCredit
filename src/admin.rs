@@ -278,6 +278,32 @@ pub fn update_config(
     );
 }
 
+/// Toggle dynamic slash threshold on/off.
+/// When enabled, slash penalties adjust based on protocol health.
+/// When disabled, uses static slash_bps from Config.
+pub fn set_dynamic_slash_threshold(
+    env: Env,
+    admin_signers: Vec<Address>,
+    enabled: bool,
+) {
+    require_admin_approval(&env, &admin_signers);
+
+    let mut cfg = config(&env);
+    cfg.dynamic_slash_threshold = enabled;
+
+    env.storage().instance().set(&DataKey::Config, &cfg);
+    env.events().publish(
+        (symbol_short!("admin"), symbol_short!("dynslash")),
+        (admin_signers.get(0).unwrap(), enabled, env.ledger().timestamp()),
+    );
+}
+
+/// Get the current effective slash threshold (either static or dynamic).
+/// This function can be called by anyone to see what slash rate would be applied.
+pub fn get_effective_slash_threshold(env: Env) -> i128 {
+    crate::helpers::calculate_dynamic_slash_threshold(&env)
+}
+
 pub fn set_reputation_nft(env: Env, admin_signers: Vec<Address>, nft_contract: Address) {
     require_admin_approval(&env, &admin_signers);
     env.storage()
