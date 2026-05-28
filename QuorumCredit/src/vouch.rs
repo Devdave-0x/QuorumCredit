@@ -94,6 +94,7 @@ pub fn vouch(
     }
 
     let sector = soroban_sdk::String::from_str(&env, "");
+    check_and_update_cooldown(&env, &voucher)?;
     do_vouch(&env, voucher, borrower, stake, token, sector)
 }
 
@@ -126,7 +127,28 @@ pub fn vouch_with_sector(
         }
     }
 
+    check_and_update_cooldown(&env, &voucher)?;
     do_vouch(&env, voucher, borrower, stake, token, sector)
+}
+
+/// Check and enforce the per-voucher global cooldown.
+/// Returns `VouchCooldownActive` if the cooldown has not elapsed.
+/// Call this once per transaction (not per borrower in a batch).
+fn check_and_update_cooldown(env: &Env, voucher: &Address) -> Result<(), ContractError> {
+    let now = env.ledger().timestamp();
+    let last: u64 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LastVouchTimestamp(voucher.clone()))
+        .unwrap_or(0);
+    if last > 0 && now < last + crate::types::DEFAULT_VOUCH_COOLDOWN_SECS {
+        return Err(ContractError::VouchCooldownActive);
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::LastVouchTimestamp(voucher.clone()), &now);
+    extend_ttl(env, &DataKey::LastVouchTimestamp(voucher.clone()));
+    Ok(())
 }
 
 fn do_vouch(
@@ -167,16 +189,9 @@ fn do_vouch(
         }
     }
 
-    // Rate limiting: enforce cooldown between vouch calls from the same address.
-    let now = env.ledger().timestamp();
-    let last: u64 = env
-        .storage()
-        .persistent()
-        .get(&DataKey::LastVouchTimestamp(voucher.clone()))
-        .unwrap_or(0);
-    if last > 0 && now < last + crate::types::DEFAULT_VOUCH_COOLDOWN_SECS {
-        return Err(ContractError::VouchCooldownActive);
-    }
+    // NOTE: cooldown is enforced by the caller (vouch / batch_vouch) once per
+    // transaction, not here, so that batch_vouch cannot bypass it by resetting
+    // the timestamp on every iteration within the same ledger.
 
     let mut vouches: Vec<VouchRecord> = env
         .storage()
@@ -233,13 +248,6 @@ fn do_vouch(
     // Task 3: Record vouch in the graph for circular detection
     record_vouch_graph(env, voucher.clone(), borrower.clone());
 
-    // Record the timestamp of this vouch for rate limiting.
-    env.storage().persistent().set(
-        &DataKey::LastVouchTimestamp(voucher.clone()),
-        &env.ledger().timestamp(),
-    );
-    extend_ttl(env, &DataKey::LastVouchTimestamp(voucher.clone()));
-
     env.events().publish(
         (symbol_short!("vouch"), symbol_short!("added")),
         (voucher, borrower, stake, token),
@@ -261,6 +269,10 @@ pub fn batch_vouch(
 
     assert!(borrowers.len() == stakes.len(), "borrowers and stakes length mismatch");
     assert!(!borrowers.is_empty(), "batch cannot be empty");
+
+    // Enforce global cooldown once for the entire batch — prevents bypass by
+    // spreading vouches across multiple borrowers in a single transaction.
+    check_and_update_cooldown(&env, &voucher)?;
 
     for i in 0..borrowers.len() {
         let borrower = borrowers.get(i).unwrap();

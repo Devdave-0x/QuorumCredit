@@ -106,6 +106,8 @@ mod admin_delegation_test;
 mod governance_veto_test;
 #[cfg(test)]
 mod loan_health_test;
+#[cfg(test)]
+mod vouch_global_cooldown_test;
 
 pub use errors::ContractError;
 pub use types::*;
