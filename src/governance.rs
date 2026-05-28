@@ -1,12 +1,11 @@
 use crate::errors::ContractError;
 use crate::helpers::{
     add_slash_balance, config, get_active_loan_record, get_latest_loan_record, has_active_loan,
-    require_governance_participant, require_not_paused,
+    require_admin_approval, require_governance_participant, require_not_paused,
 };
-use crate::insurance;
 use crate::types::{
-    DataKey, LoanStatus, SlashThresholdProposal, SlashVoteRecord, TimelockAction,
-    TimelockProposal, VouchRecord, BPS_DENOMINATOR, SlashAppealRecord,
+    DataKey, LoanStatus, PendingSlashRecord, SlashAppealRecord, SlashThresholdProposal,
+    SlashVoteRecord, TimelockAction, TimelockProposal, VouchRecord, BPS_DENOMINATOR,
 };
 use soroban_sdk::{panic_with_error, symbol_short, Address, Env, Vec};
 
@@ -269,71 +268,6 @@ pub fn execute_pending_slash(env: Env, borrower: Address) -> Result<(), Contract
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
-
-fn check_borrower_immunity(env: &Env, borrower: &Address, cfg: &crate::types::Config) -> Result<(), ContractError> {
-    if cfg.immunity_period_seconds == 0 {
-        return Ok(());
-    }
-    let registered = borrower_registration_time(env, borrower);
-    if registered == 0 {
-        return Ok(());
-    }
-    let elapsed = env.ledger().timestamp().saturating_sub(registered);
-    if elapsed < cfg.immunity_period_seconds {
-        return Err(ContractError::BorrowerImmune);
-    }
-    Ok(())
-}
-
-fn route_slashed_funds(
-    env: &Env,
-    loan_token: &Address,
-    vouches: &Vec<VouchRecord>,
-    distributable: i128,
-    rule: RedistributionRule,
-) {
-    if distributable <= 0 {
-        return;
-    }
-    match rule {
-        RedistributionRule::Treasury => add_slash_balance(env, distributable),
-        RedistributionRule::Vouchers => {
-            let mut total_stake: i128 = 0;
-            for v in vouches.iter() {
-                if v.token == *loan_token {
-                    total_stake += v.stake;
-                }
-            }
-            if total_stake == 0 {
-                add_slash_balance(env, distributable);
-                return;
-            }
-            let token = soroban_sdk::token::Client::new(env, loan_token);
-            let contract = env.current_contract_address();
-            let mut distributed: i128 = 0;
-            let mut last_voucher: Option<Address> = None;
-            for v in vouches.iter() {
-                if v.token != *loan_token {
-                    continue;
-                }
-                last_voucher = Some(v.voucher.clone());
-                let share = distributable * v.stake / total_stake;
-                distributed += share;
-                if share > 0 {
-                    token.transfer(&contract, &v.voucher, &share);
-                }
-            }
-            let remainder = distributable - distributed;
-            if remainder > 0 {
-                if let Some(voucher) = last_voucher {
-                    token.transfer(&contract, &voucher, &remainder);
-                } else {
-                    add_slash_balance(env, remainder);
-                }
-            }
-        }
-    }
-}
 
 fn next_slash_id(env: &Env) -> u64 {
     let id = env

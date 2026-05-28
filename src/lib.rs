@@ -25,6 +25,8 @@ mod emergency_pause_test;
 mod withdrawal_queue_test;
 #[cfg(test)]
 mod cross_chain_vouch_test;
+#[cfg(test)]
+mod property_stake_loan_invariants_test;
 
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
@@ -73,6 +75,9 @@ impl QuorumCreditContract {
                 voting_period_seconds: DEFAULT_VOTING_PERIOD_SECONDS,
                 slash_cooldown_seconds: 0,
                 emergency_pause_enabled: false,
+                early_repayment_discount_bps: 0,
+                oracle_address: None,
+                slash_delay_seconds: 0,
             },
         );
 
@@ -240,6 +245,8 @@ impl QuorumCreditContract {
             maturity_date: None,
             rate_type: crate::types::RateType::Fixed,
             index_reference: None,
+            escrow_status: EscrowStatus::None,
+            retry_count: 0,
         };
 
         env.storage()
@@ -602,6 +609,10 @@ impl QuorumCreditContract {
 
     pub fn execute_slash_vote(env: Env, borrower: Address) -> Result<(), ContractError> {
         governance::execute_slash_vote(env, borrower)
+    }
+
+    pub fn execute_pending_slash(env: Env, borrower: Address) -> Result<(), ContractError> {
+        governance::execute_pending_slash(env, borrower)
     }
 
     // ── Issue #680: slash threshold governance ────────────────────────────────
