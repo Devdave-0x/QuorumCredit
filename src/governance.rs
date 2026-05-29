@@ -20,6 +20,17 @@ pub fn vote_slash(
     voucher.require_auth();
     require_not_paused(&env)?;
 
+    // Check for an already-executed vote first (before the active-loan guard).
+    let existing_vote: Option<SlashVoteRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::SlashVote(borrower.clone()));
+    if let Some(ref v) = existing_vote {
+        if v.executed {
+            return Err(ContractError::SlashAlreadyExecuted);
+        }
+    }
+
     // Borrower must have an active loan to be slashable.
     let loan = get_active_loan_record(&env, &borrower)?;
     if loan.repaid || loan.defaulted {

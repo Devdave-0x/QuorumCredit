@@ -51,6 +51,7 @@ mod multi_asset_tests {
 
         StellarAssetClient::new(&s.env, &s.usdc).mint(&voucher, &1_000_000);
         s.client.vouch(&voucher, &borrower, &1_000_000, &s.usdc);
+        s.env.ledger().with_mut(|l| l.timestamp += 61);
         s.client.request_loan(&borrower, &100_000, &500_000, &purpose(&s.env), &s.usdc);
 
         let loan = s.client.get_loan(&borrower).unwrap();
@@ -112,6 +113,7 @@ mod multi_asset_tests {
 
         StellarAssetClient::new(&s.env, &s.xlm).mint(&voucher, &1_000_000);
         s.client.vouch(&voucher, &borrower, &1_000_000, &s.xlm);
+        s.env.ledger().with_mut(|l| l.timestamp += 61);
         s.client.request_loan(&borrower, &100_000, &500_000, &purpose(&s.env), &s.xlm);
 
         let loan = s.client.get_loan(&borrower).unwrap();

@@ -12,6 +12,10 @@ soroban-sdk = { version = "21.7.6", features = ["alloc"] }
 [dev-dependencies]
 soroban-sdk = { version = "21.7.6", features = ["testutils"] }
 
+[profile.coverage]
+inherits = "test"
+
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true

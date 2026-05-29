@@ -28,6 +28,8 @@ mod loan_purpose_tests {
         let borrower = Address::generate(&env);
         StellarAssetClient::new(&env, &token_id.address()).mint(&voucher, &1_000_000);
         client.vouch(&voucher, &borrower, &1_000_000, &token_id.address());
+        // Advance past MIN_VOUCH_AGE (60s).
+        env.ledger().with_mut(|l| l.timestamp += 61);
 
         (env, client, borrower, token_id.address())
     }

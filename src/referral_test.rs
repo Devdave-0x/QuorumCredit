@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod referral_tests {
-    use crate::{ContractError, QuorumCreditContract, QuorumCreditContractClient};
+    use crate::{QuorumCreditContract, QuorumCreditContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
-        token::StellarAssetClient,
+        token::{StellarAssetClient, TokenClient},
         Address, Env, String, Vec,
     };
 
@@ -39,6 +39,8 @@ mod referral_tests {
     fn do_vouch(s: &Setup, voucher: &Address, borrower: &Address, stake: i128) {
         StellarAssetClient::new(&s.env, &s.token).mint(voucher, &stake);
         s.client.vouch(voucher, borrower, &stake, &s.token);
+        // Advance past MIN_VOUCH_AGE (60s) so the vouch is usable immediately.
+        s.env.ledger().with_mut(|l| l.timestamp += 61);
     }
 
     fn do_loan(s: &Setup, borrower: &Address, amount: i128) {
@@ -68,7 +70,7 @@ mod referral_tests {
         s.client.repay(&borrower, &102_000);
 
         // Referral bonus = 1% of 100_000 = 1_000.
-        let referrer_balance = StellarAssetClient::new(&s.env, &s.token)
+        let referrer_balance = TokenClient::new(&s.env, &s.token)
             .balance(&referrer);
         assert_eq!(referrer_balance, 1_000);
     }
@@ -132,7 +134,7 @@ mod referral_tests {
         s.client.repay(&borrower, &102_000);
 
         // 2% of 100_000 = 2_000.
-        let referrer_balance = StellarAssetClient::new(&s.env, &s.token)
+        let referrer_balance = TokenClient::new(&s.env, &s.token)
             .balance(&referrer);
         assert_eq!(referrer_balance, 2_000);
     }
