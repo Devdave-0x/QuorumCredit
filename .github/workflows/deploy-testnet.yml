@@ -34,7 +34,6 @@ jobs:
             ${{ runner.os }}-cargo-deploy-
 
       - name: Install Stellar CLI
-        # Use existing cache or download and install
         run: |
           if ! command -v stellar &> /dev/null; then
             cargo install --locked stellar-cli
@@ -83,3 +82,11 @@ jobs:
             ### 🚀 Testnet Deployment Preview
             **Contract ID:** `${{ steps.deploy.outputs.contract_id }}`
             **Network:** `testnet`
+
+  integration-tests:
+    name: Run Integration Tests
+    needs: deploy
+    uses: ./.github/workflows/testnet-integration.yml
+    secrets: inherit
+    with:
+      network: testnet

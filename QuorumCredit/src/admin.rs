@@ -337,8 +337,24 @@ pub fn is_blacklisted(env: Env, borrower: Address) -> bool {
 
 pub fn upgrade(env: Env, admin_signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
     require_admin_approval(&env, &admin_signers);
+    
+    // Perform pre-upgrade safety checks
+    crate::upgrade::validate_upgrade(&env, new_wasm_hash.clone())
+        .expect("Upgrade validation failed");
+    
+    // Perform pre-upgrade health check
+    crate::upgrade::pre_upgrade_health_check(&env)
+        .expect("Pre-upgrade health check failed");
+    
+    // Execute upgrade
     env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+    
+    // Perform post-upgrade verification
+    crate::upgrade::post_upgrade_verification(&env)
+        .expect("Post-upgrade verification failed");
+    
     env.events().publish((symbol_short!("upgrade"),), new_wasm_hash);
+    log_admin_action(&env, &admin_signers.get(0).unwrap(), "upgrade");
 }
 
 // ── Pause ─────────────────────────────────────────────────────────────────────

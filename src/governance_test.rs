@@ -47,6 +47,9 @@ mod governance_tests {
     /// Vouch for `borrower` from `voucher` with `stake`, minting tokens first.
     fn do_vouch(s: &Setup, voucher: &Address, borrower: &Address, stake: i128) {
         StellarAssetClient::new(&s.env, &s.token_id).mint(voucher, &stake);
+        s.client.vouch(voucher, borrower, &stake, &s.token_id);
+        // Advance past MIN_VOUCH_AGE (60s) so the vouch is usable immediately.
+        s.env.ledger().with_mut(|l| l.timestamp += 61);
         s.client.vouch(voucher, borrower, &stake, &s.token_id, &None);
     }
 

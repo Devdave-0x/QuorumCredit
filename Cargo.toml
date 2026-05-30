@@ -1,3 +1,7 @@
+[workspace]
+members = ["QuorumCredit", "api"]
+resolver = "2"
+
 [package]
 name = "quorum_credit"
 version = "0.1.0"
@@ -11,6 +15,10 @@ soroban-sdk = { version = "26.0.0", features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "26.0.0", features = ["testutils"] }
+
+[profile.coverage]
+inherits = "test"
+
 
 [profile.release]
 opt-level = "z"

@@ -722,6 +722,24 @@ pub fn get_withdrawal_queue(env: Env, borrower: Address) -> Vec<QueuedWithdrawal
         .get(&DataKey::WithdrawalQueue(borrower))
         .unwrap_or(Vec::new(&env))
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::DataKey;
+    use crate::{QuorumCreditContract, QuorumCreditContractClient};
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
+
+    fn setup_contract(env: &Env) -> (Address, Address) {
+        let deployer = Address::generate(env);
+        let admin = Address::generate(env);
+        let admins = Vec::from_array(env, [admin.clone()]);
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+        let contract_id = env.register_contract(None, QuorumCreditContract);
+        StellarAssetClient::new(env, &token_id.address()).mint(&contract_id, &10_000_000);
+        let client = QuorumCreditContractClient::new(env, &contract_id);
+        client.initialize(&deployer, &admins, &1, &token_id.address());
+        (contract_id, token_id.address())
+    }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -746,6 +764,37 @@ fn queue_withdrawal_internal(
         }
     }
 
+        let (contract_id, token) = setup_contract(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        let borrower = Address::generate(&env);
+
+        let voucher1 = Address::generate(&env);
+        let voucher2 = Address::generate(&env);
+
+        let mut vouches = Vec::new(&env);
+        vouches.push_back(VouchRecord {
+            voucher: voucher1,
+            stake: i128::MAX - 1000,
+            vouch_timestamp: 0,
+            token: token.clone(),
+        });
+        vouches.push_back(VouchRecord {
+            voucher: voucher2,
+            stake: 2000,
+            vouch_timestamp: 0,
+            token: token.clone(),
+        });
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Vouches(borrower.clone()), &vouches);
+        });
+
+        let result = client.try_total_vouched(&borrower);
+        assert_eq!(result, Err(Ok(ContractError::StakeOverflow)));
+    }
     queue.push_back(QueuedWithdrawal {
         voucher: voucher.clone(),
         token,
@@ -831,6 +880,37 @@ pub fn revoke_delegation(
     Err(ContractError::InvalidStateTransition)
 }
 
+        let (contract_id, token) = setup_contract(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        let borrower = Address::generate(&env);
+
+        let voucher1 = Address::generate(&env);
+        let voucher2 = Address::generate(&env);
+
+        let mut vouches = Vec::new(&env);
+        vouches.push_back(VouchRecord {
+            voucher: voucher1,
+            stake: 1_000_000,
+            vouch_timestamp: 0,
+            token: token.clone(),
+        });
+        vouches.push_back(VouchRecord {
+            voucher: voucher2,
+            stake: 2_500_000,
+            vouch_timestamp: 0,
+            token: token.clone(),
+        });
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Vouches(borrower.clone()), &vouches);
+        });
+
+        let result = client.total_vouched(&borrower);
+        assert_eq!(result, 3_500_000);
+    }
 pub fn set_vouch_expiry(
     _env: Env,
     _voucher: Address,

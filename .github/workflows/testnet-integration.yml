@@ -1,0 +1,97 @@
+name: Testnet Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: 'Network to run tests against'
+        required: false
+        default: 'testnet'
+        type: choice
+        options:
+          - testnet
+  workflow_call:
+    inputs:
+      network:
+        description: 'Network to run tests against'
+        required: false
+        default: 'testnet'
+        type: string
+  schedule:
+    # Run nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  integration-tests:
+    name: Testnet Integration Tests
+    runs-on: ubuntu-latest
+    environment: testnet
+    env:
+      NETWORK: ${{ inputs.network || 'testnet' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cargo-testnet-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-testnet-
+
+      - name: Install Stellar CLI
+        run: |
+          if ! command -v stellar &> /dev/null; then
+            cargo install --locked stellar-cli
+          fi
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Validate required secrets
+        run: |
+          missing=()
+          [ -z "${{ secrets.TESTNET_DEPLOYER_SECRET_KEY }}" ] && missing+=("TESTNET_DEPLOYER_SECRET_KEY")
+          [ -z "${{ secrets.TESTNET_DEPLOYER_ADDRESS }}" ]    && missing+=("TESTNET_DEPLOYER_ADDRESS")
+          [ -z "${{ secrets.TESTNET_ADMIN_ADDRESS }}" ]       && missing+=("TESTNET_ADMIN_ADDRESS")
+          [ -z "${{ secrets.TESTNET_TOKEN_CONTRACT }}" ]      && missing+=("TESTNET_TOKEN_CONTRACT")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            echo "See docs/testnet-guide.md for setup instructions."
+            exit 1
+          fi
+
+      - name: Run testnet integration tests
+        env:
+          DEPLOYER_SECRET_KEY: ${{ secrets.TESTNET_DEPLOYER_SECRET_KEY }}
+          DEPLOYER_ADDRESS:    ${{ secrets.TESTNET_DEPLOYER_ADDRESS }}
+          ADMIN_ADDRESS:       ${{ secrets.TESTNET_ADMIN_ADDRESS }}
+          TOKEN_CONTRACT:      ${{ secrets.TESTNET_TOKEN_CONTRACT }}
+          NETWORK:             ${{ env.NETWORK }}
+        run: |
+          chmod +x ./scripts/testnet_integration_test.sh
+          ./scripts/testnet_integration_test.sh --network "$NETWORK"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-integration-results-${{ github.run_id }}
+          path: |
+            contract_id.txt
+            deploy_output.txt
+          if-no-files-found: ignore

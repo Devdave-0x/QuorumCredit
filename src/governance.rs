@@ -4,7 +4,7 @@ use crate::helpers::{
     require_admin_approval, require_governance_participant, require_not_paused,
 };
 use crate::types::{
-    DataKey, LoanStatus, PendingSlashRecord, SlashAppealRecord, SlashThresholdProposal,
+    DataKey, LoanStatus, PendingSlashRecord, SlashAppealRecord, SlashRecord, SlashThresholdProposal,
     SlashVoteRecord, TimelockAction, TimelockProposal, VouchRecord, BPS_DENOMINATOR,
 };
 use soroban_sdk::{panic_with_error, symbol_short, Address, Env, Vec};
@@ -25,6 +25,17 @@ pub fn vote_slash(
 ) -> Result<(), ContractError> {
     voucher.require_auth();
     require_not_paused(&env)?;
+
+    // Check for an already-executed vote first (before the active-loan guard).
+    let existing_vote: Option<SlashVoteRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::SlashVote(borrower.clone()));
+    if let Some(ref v) = existing_vote {
+        if v.executed {
+            return Err(ContractError::SlashAlreadyExecuted);
+        }
+    }
 
     let cfg = config(&env);
     let now = env.ledger().timestamp();
@@ -982,4 +993,168 @@ pub fn get_slashing_report(env: Env, month_id: u64) -> Option<SlashingReportReco
     env.storage()
         .persistent()
         .get(&DataKey::SlashingReport(month_id))
+}
+
+// ── Issue #687: Governance-based admin removal ────────────────────────────────
+
+/// Propose removing a compromised admin via governance vote.
+///
+/// Any governance participant (active voucher or admin) may call this.
+/// The proposal passes once `approve_votes >= Config.removal_vote_threshold`.
+pub fn propose_admin_removal(
+    env: Env,
+    proposer: Address,
+    admin_to_remove: Address,
+) -> Result<u64, ContractError> {
+    proposer.require_auth();
+    require_not_paused(&env)?;
+    require_governance_participant(&env, &proposer)?;
+
+    let cfg = config(&env);
+
+    if cfg.removal_vote_threshold == 0 {
+        return Err(ContractError::UnauthorizedCaller);
+    }
+
+    if !cfg.admins.iter().any(|a| a == admin_to_remove) {
+        return Err(ContractError::UnauthorizedCaller);
+    }
+
+    let proposal_id: u64 = env
+        .storage()
+        .instance()
+        .get::<DataKey, u64>(&DataKey::AdminRemovalProposalCounter)
+        .unwrap_or(0u64)
+        .checked_add(1)
+        .expect("proposal id overflow");
+
+    let proposal = AdminRemovalProposal {
+        id: proposal_id,
+        admin_to_remove: admin_to_remove.clone(),
+        proposer: proposer.clone(),
+        approve_votes: 0,
+        reject_votes: 0,
+        voters: Vec::new(&env),
+        proposed_at: env.ledger().timestamp(),
+        finalized: false,
+    };
+
+    env.storage()
+        .instance()
+        .set(&DataKey::AdminRemovalProposal(proposal_id), &proposal);
+    env.storage()
+        .instance()
+        .set(&DataKey::AdminRemovalProposalCounter, &proposal_id);
+
+    env.events().publish(
+        (symbol_short!("gov"), symbol_short!("rm_prop")),
+        (proposal_id, proposer, admin_to_remove),
+    );
+
+    Ok(proposal_id)
+}
+
+/// Cast a vote on an admin removal proposal.
+///
+/// Any governance participant may vote once per proposal.
+/// Voting closes once the proposal is finalized.
+pub fn vote_admin_removal(
+    env: Env,
+    voter: Address,
+    proposal_id: u64,
+    approve: bool,
+) -> Result<(), ContractError> {
+    voter.require_auth();
+    require_not_paused(&env)?;
+    require_governance_participant(&env, &voter)?;
+
+    let mut proposal: AdminRemovalProposal = env
+        .storage()
+        .instance()
+        .get(&DataKey::AdminRemovalProposal(proposal_id))
+        .ok_or(ContractError::ProposalNotFound)?;
+
+    if proposal.finalized {
+        return Err(ContractError::ProposalAlreadyFinalized);
+    }
+
+    if proposal.voters.iter().any(|v| v == voter) {
+        return Err(ContractError::AlreadyVoted);
+    }
+
+    if approve {
+        proposal.approve_votes += 1;
+    } else {
+        proposal.reject_votes += 1;
+    }
+    proposal.voters.push_back(voter.clone());
+
+    env.storage()
+        .instance()
+        .set(&DataKey::AdminRemovalProposal(proposal_id), &proposal);
+
+    env.events().publish(
+        (symbol_short!("gov"), symbol_short!("rm_vote")),
+        (proposal_id, voter, approve),
+    );
+
+    Ok(())
+}
+
+/// Finalize an admin removal proposal.
+///
+/// Succeeds once `approve_votes >= Config.removal_vote_threshold`.
+/// On success, the targeted admin is removed from `Config.admins`.
+/// Fails if the removal would drop the admin count below `admin_threshold`.
+pub fn finalize_admin_removal(env: Env, proposal_id: u64) -> Result<(), ContractError> {
+    require_not_paused(&env)?;
+
+    let mut proposal: AdminRemovalProposal = env
+        .storage()
+        .instance()
+        .get(&DataKey::AdminRemovalProposal(proposal_id))
+        .ok_or(ContractError::ProposalNotFound)?;
+
+    if proposal.finalized {
+        return Err(ContractError::ProposalAlreadyFinalized);
+    }
+
+    let mut cfg = config(&env);
+
+    if proposal.approve_votes < cfg.removal_vote_threshold {
+        return Err(ContractError::QuorumNotMet);
+    }
+
+    let idx = cfg
+        .admins
+        .iter()
+        .position(|a| a == proposal.admin_to_remove)
+        .ok_or(ContractError::UnauthorizedCaller)? as u32;
+
+    cfg.admins.remove(idx);
+
+    if cfg.admins.len() < cfg.admin_threshold {
+        return Err(ContractError::InvalidAdminThreshold);
+    }
+
+    env.storage().instance().set(&DataKey::Config, &cfg);
+
+    proposal.finalized = true;
+    env.storage()
+        .instance()
+        .set(&DataKey::AdminRemovalProposal(proposal_id), &proposal);
+
+    env.events().publish(
+        (symbol_short!("gov"), symbol_short!("rm_done")),
+        (proposal_id, proposal.admin_to_remove.clone()),
+    );
+
+    Ok(())
+}
+
+/// Return a governance admin-removal proposal by ID.
+pub fn get_admin_removal_proposal(env: Env, proposal_id: u64) -> Option<AdminRemovalProposal> {
+    env.storage()
+        .instance()
+        .get(&DataKey::AdminRemovalProposal(proposal_id))
 }

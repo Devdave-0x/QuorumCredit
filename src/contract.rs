@@ -71,8 +71,12 @@ impl QuorumCreditContract {
                 voting_period_seconds: crate::types::DEFAULT_VOTING_PERIOD_SECONDS,
                 slash_cooldown_seconds: 0,
                 emergency_pause_enabled: false,
+                successor_admin: None,
             },
         );
+
+        // Initialize API version (Issue #723)
+        crate::versioning::initialize_api_version(&env);
 
         env.events().publish(
             (symbol_short!("contract"), symbol_short!("init")),
@@ -1514,250 +1518,251 @@ impl QuorumCreditContract {
         loan::repay_partial(env, borrower, payment, token)
     }
 
-    // ── Issue #547: Loan Repayment Reminders ──────────────────────────────────
+    // ── API Versioning (Issue #723) ───────────────────────────────────────────
 
-    /// Send a repayment reminder for a loan. Anyone can call this.
-    pub fn send_repayment_reminder(env: Env, loan_id: u64) -> Result<(), ContractError> {
-        loan::send_repayment_reminder(env, loan_id)
+    /// Get the current API version of the contract.
+    ///
+    /// Returns the semantic version (major.minor.patch) of the contract's API.
+    /// Clients can use this to determine compatibility and handle version-specific behavior.
+    pub fn get_api_version(env: Env) -> ApiVersion {
+        crate::versioning::get_api_version(&env)
     }
 
-    // ── Issue #548: Dynamic Yield Based on Risk ───────────────────────────────
+    /// Check if the contract supports a specific API version.
+    ///
+    /// # Arguments
+    /// * `major` - Major version number
+    /// * `minor` - Minor version number
+    /// * `patch` - Patch version number
+    ///
+    /// Returns true if the requested version is compatible with the current version.
+    pub fn is_version_compatible(env: Env, major: u32, minor: u32, patch: u32) -> bool {
+        let current = crate::versioning::get_api_version(&env);
+        crate::versioning::is_version_compatible(
+            (major, minor, patch),
+            (current.major, current.minor, current.patch),
+        )
+    }
 
-    /// Set the risk score for a borrower. Admin-only.
-    pub fn set_borrower_risk_score(
+    // ── API Caching (Issue #724) ──────────────────────────────────────────────
+
+    /// Get a loan record with caching support.
+    ///
+    /// This function returns a cached loan record if available and valid,
+    /// otherwise fetches from storage and caches the result.
+    pub fn get_loan_cached(env: Env, borrower: Address) -> Option<LoanRecord> {
+        if let Some(loan_id) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::ActiveLoan(borrower.clone()))
+        {
+            // Try to get from cache first
+            if let Some(cached) = crate::cache::get_cached_loan(&env, loan_id) {
+                return Some(cached);
+            }
+
+            // Fall back to storage
+            if let Some(loan) = env
+                .storage()
+                .instance()
+                .get::<DataKey, LoanRecord>(&DataKey::Loan(loan_id))
+            {
+                crate::cache::set_cached_loan(&env, loan_id, loan.clone());
+                return Some(loan);
+            }
+        }
+        None
+    }
+
+    /// Get vouches for a borrower with caching support.
+    ///
+    /// This function returns cached vouches if available and valid,
+    /// otherwise fetches from storage and caches the result.
+    pub fn get_vouches_cached(env: Env, borrower: Address) -> Option<Vec<VouchRecord>> {
+        // Try to get from cache first
+        if let Some(cached) = crate::cache::get_cached_vouches(&env, &borrower) {
+            return Some(cached);
+        }
+
+        // Fall back to storage
+        if let Some(vouches) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Vec<VouchRecord>>(&DataKey::Vouches(borrower.clone()))
+        {
+            crate::cache::set_cached_vouches(&env, &borrower, vouches.clone());
+            return Some(vouches);
+        }
+        None
+    }
+
+    /// Get config with caching support.
+    ///
+    /// This function returns cached config if available and valid,
+    /// otherwise fetches from storage and caches the result.
+    pub fn get_config_cached(env: Env) -> Option<Config> {
+        // Try to get from cache first
+        if let Some(cached) = crate::cache::get_cached_config(&env) {
+            return Some(cached);
+        }
+
+        // Fall back to storage
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Config>(&DataKey::Config)
+        {
+            crate::cache::set_cached_config(&env, config.clone());
+            return Some(config);
+        }
+        None
+    }
+
+    /// Clear all caches (admin only).
+    ///
+    /// This function invalidates all cached records. Useful after configuration changes.
+    pub fn clear_all_caches(env: Env, admin_signers: Vec<Address>) -> Result<(), ContractError> {
+        admin::require_admin_auth(&env, &admin_signers)?;
+        crate::cache::invalidate_config_cache(&env);
+        Ok(())
+    }
+
+    // ── Error Standardization (Issue #725) ────────────────────────────────────
+
+    /// Get a standardized error response for a given error code.
+    ///
+    /// This function returns a structured error response that includes:
+    /// - Numeric error code
+    /// - Human-readable message
+    /// - Optional additional details
+    /// - Timestamp of when the error occurred
+    pub fn get_error_response(env: Env, error_code: u32) -> Option<ErrorResponse> {
+        // Map error codes to ContractError variants
+        let error = match error_code {
+            1 => ContractError::InsufficientFunds,
+            2 => ContractError::ActiveLoanExists,
+            3 => ContractError::StakeOverflow,
+            4 => ContractError::ZeroAddress,
+            5 => ContractError::DuplicateVouch,
+            6 => ContractError::NoActiveLoan,
+            7 => ContractError::ContractPaused,
+            8 => ContractError::LoanPastDeadline,
+            13 => ContractError::MinStakeNotMet,
+            14 => ContractError::LoanExceedsMaxAmount,
+            15 => ContractError::InsufficientVouchers,
+            16 => ContractError::UnauthorizedCaller,
+            17 => ContractError::InvalidAmount,
+            18 => ContractError::InvalidStateTransition,
+            19 => ContractError::AlreadyInitialized,
+            20 => ContractError::VouchTooRecent,
+            24 => ContractError::Blacklisted,
+            30 => ContractError::InvalidToken,
+            31 => ContractError::AlreadyVoted,
+            32 => ContractError::SlashVoteNotFound,
+            33 => ContractError::SlashAlreadyExecuted,
+            34 => ContractError::LoanBelowMinAmount,
+            35 => ContractError::QuorumNotMet,
+            _ => return None,
+        };
+
+        Some(crate::error_response::error_to_response(&env, error))
+    }
+
+    // ── Issue #687: Governance-based admin removal ────────────────────────────
+
+    /// Propose removing a compromised admin via governance vote.
+    ///
+    /// Any governance participant (active voucher or admin) may call this.
+    /// Requires `Config.removal_vote_threshold > 0`.
+    pub fn propose_admin_removal(
         env: Env,
-        admin_signers: Vec<Address>,
-        borrower: Address,
-        risk_score: u32,
+        proposer: Address,
+        admin_to_remove: Address,
+    ) -> Result<u64, ContractError> {
+        governance::propose_admin_removal(env, proposer, admin_to_remove)
+    }
+
+    /// Vote on an admin removal proposal.
+    ///
+    /// Any governance participant may vote once per proposal.
+    pub fn vote_admin_removal(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        approve: bool,
     ) -> Result<(), ContractError> {
-        loan::set_borrower_risk_score(env, admin_signers, borrower, risk_score)
+        governance::vote_admin_removal(env, voter, proposal_id, approve)
     }
 
-    // ── Issue #549: Yield Reserve Solvency Checks ─────────────────────────────
-
-    /// Get the yield reserve balance.
-    pub fn get_yield_reserve_balance(env: Env) -> i128 {
-        loan::get_yield_reserve_balance(env)
+    /// Finalize an admin removal proposal once the vote threshold is met.
+    ///
+    /// Removes the targeted admin from `Config.admins` on success.
+    pub fn finalize_admin_removal(env: Env, proposal_id: u64) -> Result<(), ContractError> {
+        governance::finalize_admin_removal(env, proposal_id)
     }
 
-    /// Set the yield reserve balance. Admin-only.
-    pub fn set_yield_reserve(
+    /// Return an admin removal proposal by ID.
+    pub fn get_admin_removal_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Option<AdminRemovalProposal> {
+        governance::get_admin_removal_proposal(env, proposal_id)
+    }
+
+    /// Set the minimum number of governance votes needed to remove an admin.
+    ///
+    /// 0 disables governance removal (admins can only be removed via multi-sig).
+    pub fn set_removal_vote_threshold(
         env: Env,
         admin_signers: Vec<Address>,
+        threshold: u32,
+    ) {
+        admin::set_removal_vote_threshold(env, admin_signers, threshold)
+    }
+
+    // ── Issue #686: Admin compensation ───────────────────────────────────────
+
+    /// Set the admin compensation rate in basis points.
+    ///
+    /// Controls what fraction of the compensation pool each admin earns per claim.
+    /// 0 disables admin compensation.
+    pub fn set_admin_compensation_bps(
+        env: Env,
+        admin_signers: Vec<Address>,
+        compensation_bps: u32,
+    ) {
+        admin::set_admin_compensation_bps(env, admin_signers, compensation_bps)
+    }
+
+    /// Add funds to the admin compensation pool.
+    ///
+    /// The `funder` transfers `amount` tokens to the contract's compensation pool.
+    /// These funds are later claimed by admins via `claim_admin_compensation`.
+    pub fn fund_admin_compensation(
+        env: Env,
+        funder: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
-        loan::set_yield_reserve(env, admin_signers, amount)
+        admin::fund_admin_compensation(env, funder, amount)
     }
 
-    // ── Issue #550: Slash Escrow for Disputed Defaults ────────────────────────
-
-    /// Release slashed funds from escrow after the escrow period expires. Admin-only.
-    pub fn release_slash_escrow(
-        env: Env,
-        admin_signers: Vec<Address>,
-        borrower: Address,
-    ) -> Result<(), ContractError> {
-        loan::release_slash_escrow(env, admin_signers, borrower)
-    }
-
-    // ── Issue #601: Loan Extension / Refinancing ──────────────────────────────
-
-    /// Defer the next payment, extending the loan deadline by one deferment period.
-    /// Limited to `MAX_DEFERMENT_PERIODS` (3) per loan.
-    pub fn defer_payment(env: Env, borrower: Address) -> Result<(), ContractError> {
-        loan::defer_payment(env, borrower)
-    }
-
-    /// Check if a borrower's active loan should be accelerated based on their default count
-    /// against `Config.acceleration_triggers`. Sets deadline to now if triggered.
-    /// Returns `LoanAccelerated` if a trigger condition is met.
-    pub fn check_acceleration(env: Env, borrower: Address) -> Result<(), ContractError> {
-        loan::check_acceleration(env, borrower)
-    }
-
-    /// Set a custom maturity date for an active loan. Admin-only.
-    /// Overrides the default deadline computed from loan_duration.
-    pub fn set_maturity_date(
-        env: Env,
-        admin_signers: Vec<Address>,
-        borrower: Address,
-        maturity_date: u64,
-    ) -> Result<(), ContractError> {
-        loan::set_maturity_date(env, admin_signers, borrower, maturity_date)
-    }
-
-    /// Set the interest rate type and optional index reference for an active loan. Admin-only.
-    /// Use `RateType::Variable` with a non-None `index_reference` for variable-rate loans.
-    pub fn set_loan_rate(
-        env: Env,
-        admin_signers: Vec<Address>,
-        borrower: Address,
-        rate_type: RateType,
-        index_reference: Option<soroban_sdk::String>,
-    ) -> Result<(), ContractError> {
-        loan::set_loan_rate(env, admin_signers, borrower, rate_type, index_reference)
-    }
-
-    /// Request a loan extension. Requires voucher approval.
+    /// Claim admin compensation.
     ///
-    /// The borrower requests an extension of their active loan deadline. Vouchers must
-    /// approve via `approve_extension`. An extension fee (1% of remaining balance) is
-    /// charged when the extension is applied. A loan may be extended at most 2 times.
-    ///
-    /// # Arguments
-    /// * `borrower` - Address of the borrower (must sign)
-    /// * `extension_secs` - Additional seconds to extend the deadline
-    ///
-    /// # Errors
-    /// * `NoActiveLoan` — borrower has no active loan
-    /// * `InvalidAmount` — extension_secs is zero
-    /// * `InvalidStateTransition` — already at max extensions or request already pending
-    /// * `ContractPaused` — contract is paused
-    pub fn request_extension(
-        env: Env,
-        borrower: Address,
-        extension_secs: u64,
-    ) -> Result<(), ContractError> {
-        loan::request_extension(env, borrower, extension_secs)
+    /// The calling admin receives their pro-rata share of
+    /// `pool * admin_compensation_bps / 10_000 / num_admins`.
+    /// Limited to once per 24 hours per admin.
+    /// Returns the amount claimed, in stroops.
+    pub fn claim_admin_compensation(env: Env, admin: Address) -> Result<i128, ContractError> {
+        admin::claim_admin_compensation(env, admin)
     }
 
-    /// Approve a pending loan extension request (called by a voucher).
-    ///
-    /// Once >50% of total stake approves, the extension is applied automatically:
-    /// the deadline is extended and a 1% fee is charged from the borrower.
-    ///
-    /// # Arguments
-    /// * `voucher` - Address of the approving voucher (must sign)
-    /// * `borrower` - Address of the borrower whose extension to approve
-    ///
-    /// # Errors
-    /// * `NoActiveLoan` — borrower has no active loan
-    /// * `TimelockNotFound` — no extension request exists for this borrower
-    /// * `VoucherNotFound` — caller is not a voucher for this borrower
-    /// * `AlreadyVoted` — voucher has already approved this extension
-    /// * `ContractPaused` — contract is paused
-    pub fn approve_extension(
-        env: Env,
-        voucher: Address,
-        borrower: Address,
-    ) -> Result<(), ContractError> {
-        loan::approve_extension(env, voucher, borrower)
+    /// Return the current admin compensation rate in basis points.
+    pub fn get_admin_compensation_bps(env: Env) -> u32 {
+        admin::get_admin_compensation_bps(env)
     }
 
-    /// Get the pending extension request for a borrower.
-    ///
-    /// # Arguments
-    /// * `borrower` - Address of the borrower
-    ///
-    /// # Returns
-    /// * `Option<LoanExtensionRequest>` - The pending request if any
-    pub fn get_extension_request(
-        env: Env,
-        borrower: Address,
-    ) -> Option<crate::types::LoanExtensionRequest> {
-        loan::get_extension_request(env, borrower)
-    }
-
-    // ── #634: Liquidity Mining ────────────────────────────────────────────────
-
-    pub fn claim_liquidity_mining_reward(env: Env, voucher: Address) -> Result<i128, ContractError> {
-        liquidity_mining::claim_liquidity_mining_reward(env, voucher)
-    }
-
-    pub fn get_pending_mining_reward(env: Env, voucher: Address) -> i128 {
-        liquidity_mining::get_pending_mining_reward(env, voucher)
-    }
-
-    // ── #635: Vouch Snapshot for Governance ──────────────────────────────────
-
-    pub fn take_vouch_snapshot(env: Env, caller: Address) -> Result<u32, ContractError> {
-        vouch_snapshot::take_vouch_snapshot(env, caller)
-    }
-
-    pub fn get_vouch_snapshot(env: Env, ledger_sequence: u32) -> Option<VouchSnapshotRecord> {
-        vouch_snapshot::get_vouch_snapshot(env, ledger_sequence)
-    }
-
-    pub fn get_snapshot_stake(env: Env, ledger_sequence: u32, borrower: Address) -> i128 {
-        vouch_snapshot::get_snapshot_stake(env, ledger_sequence, borrower)
-    }
-
-    // ── #636: Staking Derivatives ─────────────────────────────────────────────
-
-    pub fn mint_staking_derivative(env: Env, voucher: Address, borrower: Address) -> Result<(), ContractError> {
-        staking_derivatives::mint_staking_derivative(env, voucher, borrower)
-    }
-
-    pub fn transfer_staking_derivative(
-        env: Env,
-        from: Address,
-        to: Address,
-        original_voucher: Address,
-        borrower: Address,
-    ) -> Result<(), ContractError> {
-        staking_derivatives::transfer_staking_derivative(env, from, to, original_voucher, borrower)
-    }
-
-    pub fn get_staking_derivative(env: Env, voucher: Address, borrower: Address) -> Option<StakingDerivativeRecord> {
-        staking_derivatives::get_staking_derivative(env, voucher, borrower)
-    }
-
-    // ── #637: Fraud Detection ─────────────────────────────────────────────────
-
-    pub fn calculate_fraud_score(env: Env, voucher: Address) -> u32 {
-        fraud_detection::calculate_fraud_score(env, voucher)
-    }
-
-    pub fn get_fraud_score(env: Env, voucher: Address) -> u32 {
-        fraud_detection::get_fraud_score(env, voucher)
-    }
-
-    pub fn is_high_fraud_risk(env: Env, voucher: Address) -> bool {
-        fraud_detection::is_high_fraud_risk(env, voucher)
-    }
-
-    // ── Slashing Transparency Report ──────────────────────────────────────────
-
-    /// Generate (or refresh) the monthly slashing report for `month_id`.
-    ///
-    /// `month_id` = `unix_timestamp / MONTHLY_PERIOD_SECS` (30-day periods).
-    /// Scans all slash records and aggregates those within the requested month.
-    pub fn generate_slashing_report(env: Env, month_id: u64) -> SlashingReportRecord {
-        governance::generate_slashing_report(env, month_id)
-    }
-
-    /// Return the cached slashing report for `month_id`, or `None` if not yet generated.
-    pub fn get_slashing_report(env: Env, month_id: u64) -> Option<SlashingReportRecord> {
-        governance::get_slashing_report(env, month_id)
-    }
-
-    // ── Slashing Insurance ────────────────────────────────────────────────────
-
-    /// Opt a vouch into slashing insurance by paying the protocol premium.
-    ///
-    /// Premium = `stake * Config.insurance_premium_bps / 10_000`, added to the
-    /// insurance pool. Once insured, the voucher may claim from the pool on default.
-    /// Returns the premium amount paid in stroops.
-    pub fn purchase_slash_insurance(
-        env: Env,
-        voucher: Address,
-        borrower: Address,
-    ) -> Result<i128, ContractError> {
-        insurance::purchase_slash_insurance(env, voucher, borrower)
-    }
-
-    /// Returns true if the voucher has purchased slashing insurance for this borrower.
-    pub fn is_voucher_insured(env: Env, voucher: Address, borrower: Address) -> bool {
-        insurance::is_voucher_insured(env, voucher, borrower)
-    }
-
-    /// Get the current insurance fee in basis points.
-    pub fn get_insurance_fee_bps(env: Env) -> u32 {
-        insurance::get_insurance_fee_bps_pub(env)
-    }
-
-    /// Get the current insurance coverage cap in basis points.
-    pub fn get_insurance_coverage_bps(env: Env) -> u32 {
-        insurance::get_insurance_coverage_bps_pub(env)
+    /// Return the current balance of the admin compensation pool, in stroops.
+    pub fn get_admin_compensation_pool(env: Env) -> i128 {
+        admin::get_admin_compensation_pool(env)
     }
 }

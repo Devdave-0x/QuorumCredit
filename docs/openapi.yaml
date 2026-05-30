@@ -1,0 +1,1446 @@
+openapi: 3.0.3
+info:
+  title: QuorumCredit Contract API
+  description: |
+    RPC-style API for the QuorumCredit Soroban smart contract on Stellar.
+    All monetary amounts are in **stroops** (1 XLM = 10,000,000 stroops), represented as i128 strings.
+    All addresses are Stellar account/contract addresses (G... or C... strings).
+    Each endpoint maps to a single contract function invoked via `stellar contract invoke`.
+  version: 1.0.0
+  license:
+    name: MIT
+
+servers:
+  - url: https://soroban-testnet.stellar.org
+    description: Testnet
+  - url: https://rpc.mainnet.stellar.org
+    description: Mainnet
+
+tags:
+  - name: lifecycle
+    description: Contract initialization
+  - name: vouch
+    description: Vouching and stake management
+  - name: loan
+    description: Loan request, repayment, and queries
+  - name: admin
+    description: Admin-gated configuration and control
+  - name: governance
+    description: Decentralized slash voting and timelocks
+  - name: views
+    description: Read-only queries
+
+components:
+  schemas:
+    # ── Primitives ──────────────────────────────────────────────────────────
+    Address:
+      type: string
+      description: Stellar address (G... account or C... contract)
+      example: GABC1234...
+
+    Stroops:
+      type: string
+      description: i128 amount in stroops (1 XLM = 10,000,000 stroops)
+      example: "10000000"
+
+    # ── Enums ───────────────────────────────────────────────────────────────
+    LoanStatus:
+      type: string
+      enum: [None, Active, Repaid, Defaulted]
+
+    # ── Core Types ──────────────────────────────────────────────────────────
+    LoanRecord:
+      type: object
+      required: [id, borrower, co_borrowers, amount, amount_repaid, total_yield, status, created_at, disbursement_timestamp, deadline, loan_purpose, token_address]
+      properties:
+        id:
+          type: integer
+          format: int64
+        borrower:
+          $ref: '#/components/schemas/Address'
+        co_borrowers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+        amount:
+          $ref: '#/components/schemas/Stroops'
+          description: Total loan principal in stroops
+        amount_repaid:
+          $ref: '#/components/schemas/Stroops'
+          description: Cumulative repayments received
+        total_yield:
+          $ref: '#/components/schemas/Stroops'
+          description: Yield owed to vouchers, locked at disbursement
+        status:
+          $ref: '#/components/schemas/LoanStatus'
+        created_at:
+          type: integer
+          format: int64
+          description: Ledger timestamp
+        disbursement_timestamp:
+          type: integer
+          format: int64
+        repayment_timestamp:
+          type: integer
+          format: int64
+          nullable: true
+        deadline:
+          type: integer
+          format: int64
+          description: Repayment deadline (ledger timestamp)
+        loan_purpose:
+          type: string
+        token_address:
+          $ref: '#/components/schemas/Address'
+
+    VouchRecord:
+      type: object
+      required: [voucher, amount, vouch_timestamp, token]
+      properties:
+        voucher:
+          $ref: '#/components/schemas/Address'
+        amount:
+          $ref: '#/components/schemas/Stroops'
+          description: Staked collateral in stroops
+        vouch_timestamp:
+          type: integer
+          format: int64
+          description: Ledger timestamp when vouch was created
+        token:
+          $ref: '#/components/schemas/Address'
+
+    Config:
+      type: object
+      required: [admins, admin_threshold, token, allowed_tokens, yield_bps, slash_bps, max_vouchers, min_loan_amount, loan_duration, max_loan_to_stake_ratio, grace_period]
+      properties:
+        admins:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+        admin_threshold:
+          type: integer
+          format: int32
+          description: Number of admin signatures required for multisig operations
+        token:
+          $ref: '#/components/schemas/Address'
+          description: Primary protocol token contract address
+        allowed_tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+          description: Additional tokens accepted for loans/vouches
+        yield_bps:
+          type: string
+          description: Yield rate in basis points (default 200 = 2%)
+          example: "200"
+        slash_bps:
+          type: string
+          description: Slash rate in basis points (default 5000 = 50%)
+          example: "5000"
+        max_vouchers:
+          type: integer
+          format: int32
+          description: Maximum vouchers per borrower (default 100)
+        min_loan_amount:
+          $ref: '#/components/schemas/Stroops'
+          description: Minimum loan size in stroops (default 100000)
+        loan_duration:
+          type: integer
+          format: int64
+          description: Loan duration in seconds (default 2592000 = 30 days)
+        max_loan_to_stake_ratio:
+          type: integer
+          format: int32
+          description: Max loan-to-stake ratio in percent (default 150)
+        grace_period:
+          type: integer
+          format: int64
+          description: Grace period in seconds after deadline before slash is allowed
+
+    SlashVoteRecord:
+      type: object
+      required: [approve_stake, reject_stake, voters, executed]
+      properties:
+        approve_stake:
+          $ref: '#/components/schemas/Stroops'
+        reject_stake:
+          $ref: '#/components/schemas/Stroops'
+        voters:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+        executed:
+          type: boolean
+
+    TimelockProposal:
+      type: object
+      required: [id, proposer, eta, executed, cancelled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        proposer:
+          $ref: '#/components/schemas/Address'
+        eta:
+          type: integer
+          format: int64
+          description: Earliest execution timestamp
+        executed:
+          type: boolean
+        cancelled:
+          type: boolean
+
+    # ── Error ────────────────────────────────────────────────────────────────
+    ContractError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: |
+            Error codes:
+            1  InsufficientFunds
+            2  ActiveLoanExists
+            3  StakeOverflow
+            4  ZeroAddress
+            5  DuplicateVouch
+            6  NoActiveLoan
+            7  ContractPaused
+            8  LoanPastDeadline
+            13 MinStakeNotMet
+            14 LoanExceedsMaxAmount
+            15 InsufficientVouchers
+            16 UnauthorizedCaller
+            17 InvalidAmount
+            18 InvalidStateTransition
+            19 AlreadyInitialized
+            20 VouchTooRecent
+            24 Blacklisted
+            25 TimelockNotFound
+            26 TimelockNotReady
+            27 TimelockExpired
+            28 NoVouchesForBorrower
+            29 VoucherNotFound
+            30 InvalidToken
+            31 AlreadyVoted
+            32 SlashVoteNotFound
+            33 SlashAlreadyExecuted
+            34 AlreadyRepaid
+          enum: [1,2,3,4,5,6,7,8,13,14,15,16,17,18,19,20,24,25,26,27,28,29,30,31,32,33,34]
+        message:
+          type: string
+
+  responses:
+    Success:
+      description: Operation succeeded
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              result:
+                type: string
+                example: ok
+    ContractError:
+      description: Contract error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ContractError'
+
+  parameters:
+    ContractId:
+      name: contract_id
+      in: query
+      required: true
+      schema:
+        type: string
+      description: Deployed contract address (C...)
+
+
+paths:
+  # ── Lifecycle ──────────────────────────────────────────────────────────────
+  /initialize:
+    post:
+      tags: [lifecycle]
+      summary: One-time contract initialization
+      description: Deployer must sign. Sets admins, admin_threshold, and primary token. Panics if already initialized.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deployer, admins, admin_threshold, token]
+              properties:
+                deployer:
+                  $ref: '#/components/schemas/Address'
+                admins:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                admin_threshold:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                token:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  # ── Vouch ──────────────────────────────────────────────────────────────────
+  /vouch:
+    post:
+      tags: [vouch]
+      summary: Stake tokens to vouch for a borrower
+      description: |
+        Transfers `stake` stroops from voucher to contract. Requires voucher auth.
+        Stake must meet `min_stake`. Borrower must not have an active loan.
+        Vouch must be at least MIN_VOUCH_AGE (60s) old before loan can be requested.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voucher, borrower, stake, token]
+              properties:
+                voucher:
+                  $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                stake:
+                  $ref: '#/components/schemas/Stroops'
+                token:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /batch_vouch:
+    post:
+      tags: [vouch]
+      summary: Vouch for multiple borrowers in one call
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voucher, borrowers, stakes, token]
+              properties:
+                voucher:
+                  $ref: '#/components/schemas/Address'
+                borrowers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                stakes:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Stroops'
+                  description: Must be same length as borrowers
+                token:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /increase_stake:
+    post:
+      tags: [vouch]
+      summary: Add more stake to an existing vouch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voucher, borrower, additional]
+              properties:
+                voucher:
+                  $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                additional:
+                  $ref: '#/components/schemas/Stroops'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /decrease_stake:
+    post:
+      tags: [vouch]
+      summary: Reduce stake on an existing vouch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voucher, borrower, amount]
+              properties:
+                voucher:
+                  $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                amount:
+                  $ref: '#/components/schemas/Stroops'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /withdraw_vouch:
+    post:
+      tags: [vouch]
+      summary: Fully withdraw a vouch and reclaim stake
+      description: Only callable when borrower has no active loan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voucher, borrower]
+              properties:
+                voucher:
+                  $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /transfer_vouch:
+    post:
+      tags: [vouch]
+      summary: Transfer a vouch from one voucher address to another
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to, borrower]
+              properties:
+                from:
+                  $ref: '#/components/schemas/Address'
+                to:
+                  $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  # ── Loan ───────────────────────────────────────────────────────────────────
+  /request_loan:
+    post:
+      tags: [loan]
+      summary: Request a loan disbursement
+      description: |
+        Borrower must have total vouched stake >= threshold.
+        Contract balance must cover the loan amount.
+        Borrower must not be blacklisted or have an active loan.
+        All vouches must be at least MIN_VOUCH_AGE (60s) old.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower, amount, threshold, loan_purpose, token]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                amount:
+                  $ref: '#/components/schemas/Stroops'
+                threshold:
+                  $ref: '#/components/schemas/Stroops'
+                  description: Minimum total stake required to qualify
+                loan_purpose:
+                  type: string
+                token:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /repay:
+    post:
+      tags: [loan]
+      summary: Repay an active loan
+      description: |
+        Must be called by the borrower on record. Distributes stake + yield (yield_bps) back to vouchers.
+        Yield requires sufficient contract balance. Fails after deadline (use slash instead).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower, payment]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                payment:
+                  $ref: '#/components/schemas/Stroops'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /register_referral:
+    post:
+      tags: [loan]
+      summary: Register a referrer for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower, referrer]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                referrer:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  # ── Views ──────────────────────────────────────────────────────────────────
+  /get_loan:
+    post:
+      tags: [views]
+      summary: Get active loan record for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: Loan record or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoanRecord'
+                nullable: true
+
+  /get_loan_by_id:
+    post:
+      tags: [views]
+      summary: Get loan record by loan ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [loan_id]
+              properties:
+                loan_id:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          description: Loan record or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoanRecord'
+                nullable: true
+
+  /get_vouches:
+    post:
+      tags: [views]
+      summary: Get all vouches for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: List of vouch records or null
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VouchRecord'
+                nullable: true
+
+  /loan_status:
+    post:
+      tags: [views]
+      summary: Get loan status for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: Loan status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoanStatus'
+
+  /is_eligible:
+    post:
+      tags: [views]
+      summary: Check if a borrower meets the stake threshold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower, threshold]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                threshold:
+                  $ref: '#/components/schemas/Stroops'
+      responses:
+        '200':
+          description: Eligibility result
+          content:
+            application/json:
+              schema:
+                type: boolean
+
+  /total_vouched:
+    post:
+      tags: [views]
+      summary: Get total staked amount for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: Total vouched in stroops
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stroops'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /get_config:
+    post:
+      tags: [views]
+      summary: Get current protocol configuration
+      responses:
+        '200':
+          description: Config object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Config'
+
+  /get_contract_balance:
+    post:
+      tags: [views]
+      summary: Get contract's current token balance in stroops
+      responses:
+        '200':
+          description: Balance in stroops
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stroops'
+
+  /get_admins:
+    post:
+      tags: [views]
+      summary: Get list of current admin addresses
+      responses:
+        '200':
+          description: Admin addresses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Address'
+
+  /get_admin_threshold:
+    post:
+      tags: [views]
+      summary: Get required number of admin signatures
+      responses:
+        '200':
+          description: Threshold value
+          content:
+            application/json:
+              schema:
+                type: integer
+                format: int32
+
+  /get_paused:
+    post:
+      tags: [views]
+      summary: Check if contract is paused
+      responses:
+        '200':
+          description: Paused state
+          content:
+            application/json:
+              schema:
+                type: boolean
+
+  /is_blacklisted:
+    post:
+      tags: [views]
+      summary: Check if a borrower is blacklisted
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: Blacklist status
+          content:
+            application/json:
+              schema:
+                type: boolean
+
+  /get_min_stake:
+    post:
+      tags: [views]
+      summary: Get minimum stake per vouch in stroops
+      responses:
+        '200':
+          description: Min stake in stroops
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stroops'
+
+  /get_max_loan_amount:
+    post:
+      tags: [views]
+      summary: Get maximum loan amount in stroops (0 = no cap)
+      responses:
+        '200':
+          description: Max loan amount in stroops
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stroops'
+
+  /repayment_count:
+    post:
+      tags: [views]
+      summary: Get total successful repayments for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: Repayment count
+          content:
+            application/json:
+              schema:
+                type: integer
+                format: int32
+
+  /default_count:
+    post:
+      tags: [views]
+      summary: Get total defaults for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: Default count
+          content:
+            application/json:
+              schema:
+                type: integer
+                format: int32
+
+
+  # ── Admin ──────────────────────────────────────────────────────────────────
+  /pause:
+    post:
+      tags: [admin]
+      summary: Pause the contract (halts all state-mutating functions)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                  description: Must contain admin_threshold distinct admin addresses
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /unpause:
+    post:
+      tags: [admin]
+      summary: Unpause the contract
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /blacklist:
+    post:
+      tags: [admin]
+      summary: Permanently ban a borrower from requesting loans
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, borrower]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_config:
+    post:
+      tags: [admin]
+      summary: Replace the entire protocol Config struct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, config]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                config:
+                  $ref: '#/components/schemas/Config'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /update_config:
+    post:
+      tags: [admin]
+      summary: Partially update yield_bps and/or slash_bps
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                yield_bps:
+                  type: string
+                  nullable: true
+                  description: New yield rate in basis points (i128), or null to leave unchanged
+                slash_bps:
+                  type: string
+                  nullable: true
+                  description: New slash rate in basis points (i128), or null to leave unchanged
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_min_stake:
+    post:
+      tags: [admin]
+      summary: Set minimum stake per vouch in stroops
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, amount]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                amount:
+                  $ref: '#/components/schemas/Stroops'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_min_loan_amount:
+    post:
+      tags: [admin]
+      summary: Set minimum loan amount in stroops
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, amount]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                amount:
+                  $ref: '#/components/schemas/Stroops'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_max_loan_amount:
+    post:
+      tags: [admin]
+      summary: Set maximum loan amount in stroops (0 = no cap)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, amount]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                amount:
+                  $ref: '#/components/schemas/Stroops'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_min_vouchers:
+    post:
+      tags: [admin]
+      summary: Set minimum number of distinct vouchers required for a loan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, count]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                count:
+                  type: integer
+                  format: int32
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /add_allowed_token:
+    post:
+      tags: [admin]
+      summary: Add a token to the allowed tokens list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, token]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                token:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /remove_allowed_token:
+    post:
+      tags: [admin]
+      summary: Remove a token from the allowed tokens list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, token]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                token:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /add_admin:
+    post:
+      tags: [admin]
+      summary: Add a new admin address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, new_admin]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                new_admin:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /remove_admin:
+    post:
+      tags: [admin]
+      summary: Remove an admin address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, admin_to_remove]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                admin_to_remove:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_admin_threshold:
+    post:
+      tags: [admin]
+      summary: Update the multisig threshold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, new_threshold]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                new_threshold:
+                  type: integer
+                  format: int32
+                  minimum: 1
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /upgrade:
+    post:
+      tags: [admin]
+      summary: Upgrade contract WASM (requires admin_threshold signatures)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, new_wasm_hash]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                new_wasm_hash:
+                  type: string
+                  description: 32-byte WASM hash as hex string
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_protocol_fee:
+    post:
+      tags: [admin]
+      summary: Set protocol fee in basis points
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, fee_bps]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                fee_bps:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 10000
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /set_fee_treasury:
+    post:
+      tags: [admin]
+      summary: Set the address that receives collected protocol fees
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, treasury]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                treasury:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  # ── Governance ─────────────────────────────────────────────────────────────
+  /vote_slash:
+    post:
+      tags: [governance]
+      summary: Cast a slash vote for a borrower
+      description: Each voucher may vote once per slash proposal. Requires voucher auth.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voucher, borrower, approve]
+              properties:
+                voucher:
+                  $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                approve:
+                  type: boolean
+                  description: true to approve slash, false to reject
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /execute_slash_vote:
+    post:
+      tags: [governance]
+      summary: Execute a slash once quorum is reached
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /get_slash_vote:
+    post:
+      tags: [governance]
+      summary: Get current slash vote record for a borrower
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borrower]
+              properties:
+                borrower:
+                  $ref: '#/components/schemas/Address'
+      responses:
+        '200':
+          description: Slash vote record or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlashVoteRecord'
+                nullable: true
+
+  /propose_slash:
+    post:
+      tags: [governance]
+      summary: Create a timelocked slash proposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposer, borrower, delay_secs]
+              properties:
+                proposer:
+                  $ref: '#/components/schemas/Address'
+                borrower:
+                  $ref: '#/components/schemas/Address'
+                delay_secs:
+                  type: integer
+                  format: int64
+                  description: Timelock delay in seconds
+      responses:
+        '200':
+          description: Proposal ID
+          content:
+            application/json:
+              schema:
+                type: integer
+                format: int64
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /execute_slash_proposal:
+    post:
+      tags: [governance]
+      summary: Execute a timelocked slash proposal after delay has elapsed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposal_id]
+              properties:
+                proposal_id:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /cancel_slash_proposal:
+    post:
+      tags: [governance]
+      summary: Cancel a pending timelocked slash proposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [caller, proposal_id]
+              properties:
+                caller:
+                  $ref: '#/components/schemas/Address'
+                proposal_id:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'
+
+  /get_timelock_proposal:
+    post:
+      tags: [governance]
+      summary: Get a timelock proposal by ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposal_id]
+              properties:
+                proposal_id:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          description: Timelock proposal or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimelockProposal'
+                nullable: true
+
+  /set_slash_vote_quorum:
+    post:
+      tags: [governance]
+      summary: Set the quorum required for slash votes (in basis points)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_signers, quorum_bps]
+              properties:
+                admin_signers:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Address'
+                quorum_bps:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  maximum: 10000
+                  description: e.g. 5000 = 50% of total stake must vote to approve
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          $ref: '#/components/responses/ContractError'

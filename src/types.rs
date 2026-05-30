@@ -292,6 +292,14 @@ pub enum DataKey {
     VoucherInsurance(Address, Address),
     /// Cross-chain bridge validation status: (voucher, chain_id) → bool.
     BridgeValidated(Address, u32),
+    /// Issue #687: admin removal proposal id → AdminRemovalProposal
+    AdminRemovalProposal(u64),
+    /// Issue #687: monotonically increasing admin removal proposal counter
+    AdminRemovalProposalCounter,
+    /// Issue #686: accumulated admin compensation pool balance (i128 stroops)
+    AdminCompensation,
+    /// Issue #686: last compensation claim timestamp per admin address
+    AdminLastClaim(Address),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -351,6 +359,11 @@ pub struct ConfigUpdateProposal {
 pub struct Config {
     pub admins: Vec<Address>,
     pub admin_threshold: u32,
+    /// Admin addresses that are permitted to be configured as admins.
+    /// If empty, any valid admin address may be used.
+    pub admin_whitelist: Vec<Address>,
+    /// Admin addresses that are explicitly forbidden from being configured as admins.
+    pub admin_blacklist: Vec<Address>,
     /// Primary token contract address used for loans and vouches.
     pub token: Address,
     /// Additional token contract addresses accepted for loans/vouches.
@@ -390,6 +403,9 @@ pub struct Config {
     pub oracle_address: Option<soroban_sdk::Address>,
     /// Delay (in seconds) after a slash vote reaches quorum before it can be executed (0 = immediate).
     pub slash_delay_seconds: u64,
+    /// Designated successor admin address that can claim admin rights without multi-sig approval
+    /// when current admins are unavailable.
+    pub successor_admin: Option<Address>,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────
@@ -555,22 +571,8 @@ pub enum TimelockAction {
     SetConfig(Config),
 }
 
-/// Escrow state for a repayment pending oracle verification.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EscrowStatus {
-    /// No escrow in flight (default).
-    None,
-    /// Repayment held pending oracle approval.
-    Pending,
-    /// Oracle approved — funds released to vouchers.
-    Released,
-    /// Oracle rejected — funds returned to borrower.
-    Rejected,
-}
-
-/// A slash execution that has been approved by governance but is waiting for
-/// its `executable_at` delay to elapse before it can be carried out.
+/// A pending slash awaiting execution after the mandatory delay period.
+/// Created when a slash vote reaches quorum; executed via `execute_pending_slash`.
 #[contracttype]
 #[derive(Clone)]
 pub struct PendingSlashRecord {
@@ -632,21 +634,6 @@ pub struct WithdrawalRequest {
     pub requested_at: u64,
 }
 
-/// A pending slash awaiting execution after the mandatory delay period.
-/// Created when a slash vote reaches quorum; executed via `execute_pending_slash`.
-#[contracttype]
-#[derive(Clone)]
-pub struct PendingSlashRecord {
-    /// Borrower subject to the pending slash.
-    pub borrower: soroban_sdk::Address,
-    /// Ledger timestamp when the slash vote was approved.
-    pub approved_at: u64,
-    /// Earliest ledger timestamp at which the slash may be executed.
-    pub executable_at: u64,
-    /// True once the slash has been executed.
-    pub executed: bool,
-}
-
 /// A queued withdrawal request submitted during an active loan.
 /// Processed automatically when the loan is repaid or slashed.
 #[contracttype]
@@ -664,151 +651,82 @@ pub struct QueuedWithdrawal {
     pub priority_fee: i128,
 }
 
-#[contracttype]
-#[derive(Clone)]
-pub struct YieldDistributionEntry {
-    pub voucher: Address,
-    pub yield_amount: i128,
-}
+/// Current API version of the contract.
+pub const API_VERSION: u32 = 1;
 
 #[contracttype]
 #[derive(Clone)]
-pub struct SlashAppealRecord {
-    pub borrower: Address,
-    pub voucher: Address,
-    pub evidence_hash: soroban_sdk::BytesN<32>,
-    pub appeal_timestamp: u64,
-    pub approved: Option<bool>,
-    pub admin_votes: Vec<Address>,
+pub struct ApiVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
 }
 
+// ── API Caching (Issue #724) ──────────────────────────────────────────────────
+
+/// Issue #687: Governance proposal to remove a compromised admin address.
+/// Passes when `approve_votes >= Config.removal_vote_threshold`.
 #[contracttype]
 #[derive(Clone)]
-pub struct AdminActionProposal {
+pub struct AdminRemovalProposal {
     pub id: u64,
-    pub action_type: soroban_sdk::String,
+    /// Admin address to be removed if the proposal passes.
+    pub admin_to_remove: Address,
+    /// Address that created the proposal (must be a governance participant).
     pub proposer: Address,
-    pub approvals: Vec<Address>,
-    pub created_at: u64,
-    pub executed: bool,
+    /// Number of approve votes cast so far.
+    pub approve_votes: u32,
+    /// Number of reject votes cast so far.
+    pub reject_votes: u32,
+    /// Addresses that have already voted (prevent double-voting).
+    pub voters: Vec<Address>,
+    /// Ledger timestamp when the proposal was created.
+    pub proposed_at: u64,
+    /// True once the proposal has been finalized (admin removed or rejected).
+    pub finalized: bool,
 }
 
 // ── Pagination ────────────────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone)]
-pub struct PaginationParams {
-    /// Maximum number of results to return (default 10, max 100)
-    pub limit: u32,
-    /// Offset for cursor-based pagination
-    pub offset: u32,
+pub enum CacheKey {
+    LoanCache(u64),           // loan_id → CachedLoanRecord
+    VouchesCache(Address),    // borrower → CachedVouchesRecord
+    ConfigCache,              // CachedConfigRecord
 }
 
 #[contracttype]
 #[derive(Clone)]
-pub struct PaginatedLoans {
-    pub loans: Vec<LoanRecord>,
-    pub total: u32,
-    pub limit: u32,
-    pub offset: u32,
+pub struct CachedLoanRecord {
+    pub data: LoanRecord,
+    pub cached_at: u64,
 }
 
 #[contracttype]
 #[derive(Clone)]
-pub struct PaginatedVouches {
-    pub vouches: Vec<VouchRecord>,
-    pub total: u32,
-    pub limit: u32,
-    pub offset: u32,
-}
-
-// ── Voucher Stats ─────────────────────────────────────────────────────────────
-
-/// Cumulative reputation statistics for a voucher address.
-/// Updated on every repayment (success) and slash (default) event.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VoucherStats {
-    /// Total number of vouches that ended in a successful repayment.
-    pub successful_vouches: u32,
-    /// Total number of vouches that ended in a slash (default).
-    pub total_vouches_slashed: u32,
-    /// Cumulative yield earned across all successful repayments, in stroops.
-    pub total_yield_earned: i128,
-    /// Cumulative stake amount slashed across all defaults, in stroops.
-    pub total_slashed: i128,
-}
-
-// ── Pause Mode ────────────────────────────────────────────────────────────────
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PauseMode {
-    None,
-    Paused,
-    Thawing,
+pub struct CachedVouchesRecord {
+    pub data: Vec<VouchRecord>,
+    pub cached_at: u64,
 }
 
 #[contracttype]
 #[derive(Clone)]
-pub struct ThawState {
-    pub pause_timestamp: u64,
-    pub thaw_duration: u64,
-    pub thaw_start_timestamp: u64,
+pub struct CachedConfigRecord {
+    pub data: Config,
+    pub cached_at: u64,
 }
 
-// ── #634: Liquidity Mining ────────────────────────────────────────────────────
-
-/// Epoch duration for liquidity mining rewards (7 days).
-pub const LIQUIDITY_MINING_EPOCH_SECS: u64 = 7 * 24 * 60 * 60;
-
-// ── #635: Vouch Snapshot for Governance ──────────────────────────────────────
+// ── Error Standardization (Issue #725) ────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone)]
-pub struct VouchSnapshotEntry {
-    pub borrower: Address,
-    pub total_stake: i128,
-}
-
-#[contracttype]
-#[derive(Clone)]
-pub struct VouchSnapshotRecord {
-    pub ledger_sequence: u32,
+pub struct ErrorResponse {
+    /// Numeric error code matching ContractError enum.
+    pub code: u32,
+    /// Human-readable error message.
+    pub message: soroban_sdk::String,
+    /// Optional additional context or details.
+    pub details: Option<soroban_sdk::String>,
+    /// Timestamp when the error occurred.
     pub timestamp: u64,
-    pub entries: Vec<VouchSnapshotEntry>,
-}
-
-// ── #636: Staking Derivatives ─────────────────────────────────────────────────
-
-#[contracttype]
-#[derive(Clone)]
-pub struct StakingDerivativeRecord {
-    pub voucher: Address,
-    pub borrower: Address,
-    pub stake_amount: i128,
-    pub minted_at: u64,
-    pub current_holder: Address,
-    pub is_active: bool,
-}
-
-// ── #637: Fraud Detection ─────────────────────────────────────────────────────
-
-pub const FRAUD_SCORE_HIGH_THRESHOLD: u32 = 70;
-pub const FRAUD_SCORE_MAX: u32 = 100;
-pub const FRAUD_SCORE_DEFAULT_WEIGHT: u32 = 20;
-pub const FRAUD_SCORE_CONCENTRATION_WEIGHT: u32 = 10;
-
-// ── #667: External Credit Score ───────────────────────────────────────────────
-
-/// Credit score record pushed by a trusted oracle.
-#[contracttype]
-#[derive(Clone)]
-pub struct ExternalCreditScore {
-    /// Score in range 0–1000.
-    pub score: u32,
-    /// Ledger timestamp when this score was last updated.
-    pub updated_at: u64,
-    /// Oracle address that submitted this score.
-    pub oracle: Address,
 }

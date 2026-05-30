@@ -29,6 +29,7 @@ mod tests {
             loan_size_slash_enabled: false,
             loan_size_slash_max_bps: DEFAULT_LOAN_SIZE_SLASH_MAX_BPS,
             confirmation_required,
+            successor_admin: None,
         }
     }
 

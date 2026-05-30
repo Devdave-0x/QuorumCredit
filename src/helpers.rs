@@ -62,12 +62,6 @@ pub fn validate_timestamp(_env: &Env, timestamp: u64, now: u64) -> Result<(), Co
     Ok(())
 }
 
-/// Returns `Err(InsufficientFunds)` if `amount` is not strictly positive (≤ 0).
-/// Kept for backward compatibility; prefer `validate_amount` in new code.
-pub fn require_positive_amount(env: &Env, amount: i128) -> Result<(), ContractError> {
-    validate_amount(env, amount).map_err(|_| ContractError::InsufficientFunds)
-}
-
 // ── Config & Loan Helpers ─────────────────────────────────────────────────────
 
 pub fn config(env: &Env) -> Config {
@@ -171,12 +165,37 @@ pub fn validate_admin_config(
     env: &Env,
     admins: &Vec<Address>,
     admin_threshold: u32,
+    admin_whitelist: &Vec<Address>,
+    admin_blacklist: &Vec<Address>,
 ) -> Result<(), ContractError> {
     if admins.is_empty() {
         return Err(ContractError::InvalidAdminThreshold);
     }
     if admin_threshold == 0 || admin_threshold > admins.len() {
         return Err(ContractError::InvalidAdminThreshold);
+    }
+    for i in 0..admin_whitelist.len() {
+        let allowed = admin_whitelist.get(i).unwrap();
+        require_valid_address(env, &allowed)?;
+        for j in 0..i {
+            let prior = admin_whitelist.get(j).unwrap();
+            if allowed == prior {
+                return Err(ContractError::InvalidAdminThreshold);
+            }
+        }
+    }
+    for i in 0..admin_blacklist.len() {
+        let blocked = admin_blacklist.get(i).unwrap();
+        require_valid_address(env, &blocked)?;
+        for j in 0..i {
+            let prior = admin_blacklist.get(j).unwrap();
+            if blocked == prior {
+                return Err(ContractError::InvalidAdminThreshold);
+            }
+        }
+        if admin_whitelist.iter().any(|a| a == blocked) {
+            return Err(ContractError::InvalidAdminThreshold);
+        }
     }
     let admin_count = admins.len();
     for i in 0..admin_count {
@@ -187,6 +206,14 @@ pub fn validate_admin_config(
             if admin == prior_admin {
                 return Err(ContractError::InvalidAdminThreshold);
             }
+        }
+        if !admin_whitelist.is_empty()
+            && !admin_whitelist.iter().any(|allowed| allowed == admin)
+        {
+            return Err(ContractError::AdminNotWhitelisted);
+        }
+        if admin_blacklist.iter().any(|blocked| blocked == admin) {
+            return Err(ContractError::AdminBlacklisted);
         }
     }
     Ok(())
