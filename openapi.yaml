@@ -1,0 +1,535 @@
+openapi: 3.0.0
+info:
+  title: QuorumCredit API
+  description: Decentralized microlending platform powered by social trust on Stellar Soroban
+  version: 1.0.0
+  contact:
+    name: QuorumCredit Team
+    url: https://github.com/QuorumCredit/QuorumCredit
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://soroban-testnet.stellar.org:443
+    description: Stellar Testnet
+  - url: https://rpc.mainnet.stellar.org:443
+    description: Stellar Mainnet
+
+paths:
+  /initialize:
+    post:
+      summary: Initialize the contract
+      description: One-time setup of the QuorumCredit contract with admin addresses and token
+      operationId: initialize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitializeRequest'
+      responses:
+        '200':
+          description: Contract initialized successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vouch:
+    post:
+      summary: Stake tokens to vouch for a borrower
+      description: Create social collateral by staking XLM for a borrower
+      operationId: vouch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VouchRequest'
+      responses:
+        '200':
+          description: Vouch created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Invalid vouch parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /batch-vouch:
+    post:
+      summary: Stake for multiple borrowers atomically
+      description: Create vouches for multiple borrowers in a single transaction
+      operationId: batchVouch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchVouchRequest'
+      responses:
+        '200':
+          description: Batch vouch created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Invalid batch vouch parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /request-loan:
+    post:
+      summary: Request a loan
+      description: Borrow funds if sufficient vouches exist
+      operationId: requestLoan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestLoanRequest'
+      responses:
+        '200':
+          description: Loan disbursed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoanResponse'
+        '400':
+          description: Loan request failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /repay:
+    post:
+      summary: Repay a loan
+      description: Repay loan principal and distribute yield to vouchers
+      operationId: repay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RepayRequest'
+      responses:
+        '200':
+          description: Loan repaid successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Repayment failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /slash:
+    post:
+      summary: Slash a defaulted borrower
+      description: Admin marks default and burns 50% of voucher stakes
+      operationId: slash
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlashRequest'
+      responses:
+        '200':
+          description: Slash executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Slash failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /get-loan/{borrower}:
+    get:
+      summary: Get loan record for a borrower
+      description: Retrieve active loan details
+      operationId: getLoan
+      parameters:
+        - name: borrower
+          in: path
+          required: true
+          schema:
+            type: string
+            description: Borrower address
+      responses:
+        '200':
+          description: Loan record retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoanRecord'
+        '404':
+          description: No active loan found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /get-vouches/{borrower}:
+    get:
+      summary: Get all vouches for a borrower
+      description: Retrieve list of all vouchers and their stakes
+      operationId: getVouches
+      parameters:
+        - name: borrower
+          in: path
+          required: true
+          schema:
+            type: string
+            description: Borrower address
+      responses:
+        '200':
+          description: Vouches retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VouchRecord'
+        '404':
+          description: No vouches found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /is-eligible/{borrower}:
+    get:
+      summary: Check loan eligibility
+      description: Verify if borrower meets stake threshold
+      operationId: isEligible
+      parameters:
+        - name: borrower
+          in: path
+          required: true
+          schema:
+            type: string
+            description: Borrower address
+        - name: threshold
+          in: query
+          required: true
+          schema:
+            type: string
+            description: Minimum stake required in stroops
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+            description: Token contract address
+      responses:
+        '200':
+          description: Eligibility check result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EligibilityResponse'
+
+  /get-config:
+    get:
+      summary: Get protocol configuration
+      description: Retrieve current protocol settings
+      operationId: getConfig
+      responses:
+        '200':
+          description: Configuration retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Config'
+
+components:
+  schemas:
+    InitializeRequest:
+      type: object
+      required:
+        - deployer
+        - admins
+        - admin_threshold
+        - token
+      properties:
+        deployer:
+          type: string
+          description: Deployer address (must sign transaction)
+        admins:
+          type: array
+          items:
+            type: string
+          description: Admin addresses for governance
+        admin_threshold:
+          type: integer
+          description: Minimum signatures required for admin operations
+        token:
+          type: string
+          description: Primary token contract address
+
+    VouchRequest:
+      type: object
+      required:
+        - voucher
+        - borrower
+        - stake
+        - token
+      properties:
+        voucher:
+          type: string
+          description: Voucher address (must sign)
+        borrower:
+          type: string
+          description: Borrower address
+        stake:
+          type: string
+          description: Stake amount in stroops
+        token:
+          type: string
+          description: Token contract address
+
+    BatchVouchRequest:
+      type: object
+      required:
+        - voucher
+        - borrowers
+        - stakes
+        - token
+      properties:
+        voucher:
+          type: string
+          description: Voucher address (must sign)
+        borrowers:
+          type: array
+          items:
+            type: string
+          description: Borrower addresses
+        stakes:
+          type: array
+          items:
+            type: string
+          description: Stake amounts in stroops (must match borrowers length)
+        token:
+          type: string
+          description: Token contract address
+
+    RequestLoanRequest:
+      type: object
+      required:
+        - borrower
+        - amount
+        - threshold
+        - loan_purpose
+        - token
+      properties:
+        borrower:
+          type: string
+          description: Borrower address (must sign)
+        amount:
+          type: string
+          description: Loan amount in stroops
+        threshold:
+          type: string
+          description: Minimum total stake required
+        loan_purpose:
+          type: string
+          description: Purpose of the loan
+        token:
+          type: string
+          description: Token contract address
+
+    RepayRequest:
+      type: object
+      required:
+        - borrower
+        - payment
+      properties:
+        borrower:
+          type: string
+          description: Borrower address (must sign)
+        payment:
+          type: string
+          description: Repayment amount in stroops
+
+    SlashRequest:
+      type: object
+      required:
+        - admin_signers
+        - borrower
+      properties:
+        admin_signers:
+          type: array
+          items:
+            type: string
+          description: Admin addresses signing the slash
+        borrower:
+          type: string
+          description: Borrower address to slash
+
+    LoanRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique loan ID
+        borrower:
+          type: string
+          description: Borrower address
+        amount:
+          type: string
+          description: Principal amount in stroops
+        amount_repaid:
+          type: string
+          description: Amount repaid so far in stroops
+        total_yield:
+          type: string
+          description: Total yield locked in stroops
+        status:
+          type: string
+          enum: [Active, Repaid, Defaulted]
+          description: Current loan status
+        created_at:
+          type: string
+          format: date-time
+          description: Loan creation timestamp
+        deadline:
+          type: string
+          format: date-time
+          description: Repayment deadline
+        loan_purpose:
+          type: string
+          description: Purpose of the loan
+
+    VouchRecord:
+      type: object
+      properties:
+        voucher:
+          type: string
+          description: Voucher address
+        stake:
+          type: string
+          description: Staked amount in stroops
+        vouch_timestamp:
+          type: string
+          format: date-time
+          description: When the vouch was created
+        token:
+          type: string
+          description: Token contract address
+
+    Config:
+      type: object
+      properties:
+        admins:
+          type: array
+          items:
+            type: string
+          description: Admin addresses
+        admin_threshold:
+          type: integer
+          description: Minimum signatures required
+        token:
+          type: string
+          description: Primary token address
+        allowed_tokens:
+          type: array
+          items:
+            type: string
+          description: Allowed token addresses
+        yield_bps:
+          type: integer
+          description: Yield rate in basis points
+        slash_bps:
+          type: integer
+          description: Slash rate in basis points
+        min_loan_amount:
+          type: string
+          description: Minimum loan amount in stroops
+        max_loan_amount:
+          type: string
+          description: Maximum loan amount in stroops
+        loan_duration:
+          type: integer
+          description: Loan duration in seconds
+
+    EligibilityResponse:
+      type: object
+      properties:
+        eligible:
+          type: boolean
+          description: Whether borrower is eligible
+        total_vouched:
+          type: string
+          description: Total vouched amount in stroops
+        threshold:
+          type: string
+          description: Required threshold in stroops
+
+    TransactionResponse:
+      type: object
+      properties:
+        transaction_hash:
+          type: string
+          description: Transaction hash on Stellar
+        status:
+          type: string
+          enum: [success, pending, failed]
+          description: Transaction status
+        timestamp:
+          type: string
+          format: date-time
+          description: Transaction timestamp
+
+    LoanResponse:
+      type: object
+      properties:
+        transaction_hash:
+          type: string
+          description: Transaction hash
+        loan_id:
+          type: string
+          description: Unique loan ID
+        amount_disbursed:
+          type: string
+          description: Amount disbursed in stroops
+        deadline:
+          type: string
+          format: date-time
+          description: Repayment deadline
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          description: Error code
+        message:
+          type: string
+          description: Error message
+        details:
+          type: object
+          description: Additional error details
