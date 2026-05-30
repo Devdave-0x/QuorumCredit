@@ -78,6 +78,20 @@ impl QuorumCreditContract {
         // Initialize API version (Issue #723)
         crate::versioning::initialize_api_version(&env);
 
+        // Set initial semantic contract version and record deployment (Issues #742, #743)
+        crate::versioning::set_contract_version(
+            &env,
+            1,
+            0,
+            0,
+            soroban_sdk::String::from_slice(&env, "initial deployment"),
+        );
+        crate::versioning::record_deployment(
+            &env,
+            deployer.clone(),
+            soroban_sdk::String::from_slice(&env, "mainnet"),
+        );
+
         env.events().publish(
             (symbol_short!("contract"), symbol_short!("init")),
             (deployer, admins, admin_threshold, token),
@@ -1542,6 +1556,129 @@ impl QuorumCreditContract {
             (major, minor, patch),
             (current.major, current.minor, current.patch),
         )
+    }
+
+    // ── Contract Versioning (Issue #742) ─────────────────────────────────────
+
+    /// Return the current semantic contract version.
+    pub fn get_contract_version(env: Env) -> ContractSemVer {
+        crate::versioning::get_contract_version(&env)
+    }
+
+    /// Set a new semantic contract version (admin-gated).
+    pub fn set_contract_version(
+        env: Env,
+        admin_signers: Vec<Address>,
+        major: u32,
+        minor: u32,
+        patch: u32,
+        note: soroban_sdk::String,
+    ) {
+        crate::helpers::require_admin_approval(&env, &admin_signers);
+        crate::versioning::set_contract_version(&env, major, minor, patch, note);
+    }
+
+    /// Bump the patch version component (admin-gated).
+    pub fn bump_patch(env: Env, admin_signers: Vec<Address>, note: soroban_sdk::String) {
+        crate::helpers::require_admin_approval(&env, &admin_signers);
+        crate::versioning::bump_patch(&env, note);
+    }
+
+    /// Bump the minor version component, resetting patch to 0 (admin-gated).
+    pub fn bump_minor(env: Env, admin_signers: Vec<Address>, note: soroban_sdk::String) {
+        crate::helpers::require_admin_approval(&env, &admin_signers);
+        crate::versioning::bump_minor(&env, note);
+    }
+
+    /// Bump the major version component, resetting minor and patch to 0 (admin-gated).
+    pub fn bump_major(env: Env, admin_signers: Vec<Address>, note: soroban_sdk::String) {
+        crate::helpers::require_admin_approval(&env, &admin_signers);
+        crate::versioning::bump_major(&env, note);
+    }
+
+    /// Retrieve a version history entry by sequential index.
+    pub fn get_version_history_entry(env: Env, index: u32) -> Option<VersionHistoryEntry> {
+        crate::versioning::get_version_history_entry(&env, index)
+    }
+
+    /// Total number of recorded version history entries.
+    pub fn version_history_count(env: Env) -> u32 {
+        crate::versioning::version_history_count(&env)
+    }
+
+    // ── Deployment Records (Issue #743) ──────────────────────────────────────
+
+    /// Record a new deployment on-chain (admin-gated).
+    ///
+    /// Typically called right after `initialize` or `upgrade` to capture the
+    /// deployer, network, and version at the time of deployment.
+    pub fn record_deployment(
+        env: Env,
+        admin_signers: Vec<Address>,
+        deployer: Address,
+        network: soroban_sdk::String,
+    ) {
+        crate::helpers::require_admin_approval(&env, &admin_signers);
+        crate::versioning::record_deployment(&env, deployer, network);
+    }
+
+    /// Retrieve a deployment record by sequential index.
+    pub fn get_deployment_record(env: Env, index: u32) -> Option<DeploymentRecord> {
+        crate::versioning::get_deployment_record(&env, index)
+    }
+
+    /// Total number of recorded deployments.
+    pub fn deployment_count(env: Env) -> u32 {
+        crate::versioning::deployment_count(&env)
+    }
+
+    // ── Rollback Snapshots (Issue #744) ──────────────────────────────────────
+
+    /// Save a rollback snapshot for the given deployment index (admin-gated).
+    ///
+    /// Call this *before* applying an upgrade so the previous config state is
+    /// preserved and can be restored via `apply_rollback_snapshot`.
+    pub fn save_rollback_snapshot(
+        env: Env,
+        admin_signers: Vec<Address>,
+        deployment_index: u32,
+    ) {
+        crate::helpers::require_admin_approval(&env, &admin_signers);
+        let cfg = crate::helpers::config(&env);
+        crate::versioning::save_rollback_snapshot(
+            &env,
+            deployment_index,
+            cfg.yield_bps,
+            cfg.slash_bps,
+            cfg.max_vouchers,
+            cfg.admin_threshold,
+        );
+    }
+
+    /// Retrieve a rollback snapshot by deployment index.
+    pub fn get_rollback_snapshot(env: Env, deployment_index: u32) -> Option<RollbackSnapshot> {
+        crate::versioning::get_rollback_snapshot(&env, deployment_index)
+    }
+
+    /// Returns `true` when a rollback snapshot exists for the given index.
+    pub fn has_rollback_snapshot(env: Env, deployment_index: u32) -> bool {
+        crate::versioning::has_rollback_snapshot(&env, deployment_index)
+    }
+
+    /// Restore critical config fields from a saved rollback snapshot (admin-gated).
+    ///
+    /// Applies `yield_bps`, `slash_bps`, `max_vouchers`, and `admin_threshold`
+    /// from the snapshot. Panics if no snapshot exists for the given index.
+    pub fn apply_rollback_snapshot(
+        env: Env,
+        admin_signers: Vec<Address>,
+        deployment_index: u32,
+    ) {
+        crate::helpers::require_admin_approval(&env, &admin_signers);
+        let applied = crate::versioning::apply_rollback_snapshot(&env, deployment_index);
+        if !applied {
+            panic_with_error!(&env, ContractError::RollbackSnapshotNotFound);
+        }
     }
 
     // ── API Caching (Issue #724) ──────────────────────────────────────────────

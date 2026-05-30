@@ -86,4 +86,6 @@ pub enum ContractError {
     InvalidProof = 61,
     /// Arithmetic overflow or underflow occurred.
     ArithmeticError = 62,
+    /// No rollback snapshot found for the requested deployment index (#744).
+    RollbackSnapshotNotFound = 63,
 }

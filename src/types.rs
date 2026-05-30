@@ -337,6 +337,18 @@ pub enum DataKey {
     AdminLastClaim(Address),
     RolePermissions(Address), // address -> RolePermissions
     RateLimit(Address),        // address -> (u64 last_call_window_start, u32 call_count)
+    /// Issue #742: current semantic contract version
+    ContractVersion,
+    /// Issue #742: version history entries by index
+    ContractVersionHistory(u32),
+    /// Issue #742: number of version history entries
+    ContractVersionHistoryCount,
+    /// Issue #743: deployment record by index
+    DeploymentRecord(u32),
+    /// Issue #743: total number of deployment records
+    DeploymentRecordCount,
+    /// Issue #744: rollback snapshot of config keyed by version index
+    RollbackSnapshot(u32),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -708,6 +720,68 @@ pub struct ApiVersion {
     pub major: u32,
     pub minor: u32,
     pub patch: u32,
+}
+
+// ── Contract Versioning (Issue #742) ─────────────────────────────────────────
+
+/// Semantic version record stored on-chain for the contract itself.
+#[contracttype]
+#[derive(Clone)]
+pub struct ContractSemVer {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    /// Ledger timestamp when this version was set.
+    pub updated_at: u64,
+    /// Short human-readable change note (max 64 chars).
+    pub note: soroban_sdk::String,
+}
+
+/// A single entry in the on-chain version history log.
+#[contracttype]
+#[derive(Clone)]
+pub struct VersionHistoryEntry {
+    pub version: ContractSemVer,
+    /// Sequential index of this entry (0-based).
+    pub index: u32,
+}
+
+// ── Deployment Records (Issue #743) ──────────────────────────────────────────
+
+/// On-chain record of a single contract deployment or upgrade.
+#[contracttype]
+#[derive(Clone)]
+pub struct DeploymentRecord {
+    /// Sequential deployment index (0-based).
+    pub index: u32,
+    /// Deployer address that signed the transaction.
+    pub deployer: Address,
+    /// Ledger timestamp of the deployment.
+    pub deployed_at: u64,
+    /// Semantic version active at time of deployment.
+    pub version: ContractSemVer,
+    /// Network identifier ("testnet" | "mainnet").
+    pub network: soroban_sdk::String,
+}
+
+// ── Rollback Snapshots (Issue #744) ──────────────────────────────────────────
+
+/// Snapshot of critical config fields saved before an upgrade, used for rollback.
+#[contracttype]
+#[derive(Clone)]
+pub struct RollbackSnapshot {
+    /// Deployment index this snapshot corresponds to.
+    pub deployment_index: u32,
+    /// Ledger timestamp when the snapshot was taken.
+    pub snapshot_at: u64,
+    /// Semantic version at snapshot time.
+    pub version: ContractSemVer,
+    /// Serialised config — stores yield_bps, slash_bps, max_vouchers, and
+    /// admin_threshold so a rollback can restore these critical parameters.
+    pub yield_bps: i128,
+    pub slash_bps: i128,
+    pub max_vouchers: u32,
+    pub admin_threshold: u32,
 }
 
 // ── API Caching (Issue #724) ──────────────────────────────────────────────────
