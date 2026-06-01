@@ -49,6 +49,7 @@ use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
     require_allowed_token, require_not_paused,
 };
+use soroban_sdk::BytesN;
 
 #[contract]
 pub struct QuorumCreditContract;
@@ -311,6 +312,15 @@ impl QuorumCreditContract {
         token: Address,
     ) -> Result<(), ContractError> {
         loan::request_loan(env, borrower, amount, threshold, loan_purpose, token)
+    }
+
+    pub fn dispute_vouch(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+        evidence_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        vouch::dispute_vouch(env, voucher, borrower, evidence_hash)
     }
 
     pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractError> {

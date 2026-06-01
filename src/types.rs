@@ -314,6 +314,8 @@ pub enum DataKey {
     StakingDerivative(Address, Address),
     // #637: Fraud Detection
     VoucherFraudScore(Address),
+    /// Repayment dispute raised by a voucher: (borrower, voucher) -> DisputeRecord
+    RepaymentDispute(Address, Address),
     // #667: Oracle address for repayment verification
     OracleAddress,
     // #667: External credit score per borrower
@@ -366,6 +368,16 @@ pub struct SlashVoteRecord {
     pub voters: Vec<Address>,
     /// `true` once the slash has been auto-executed after quorum was reached.
     pub executed: bool,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeRecord {
+    pub borrower: Address,
+    pub voucher: Address,
+    pub evidence_hash: soroban_sdk::BytesN<32>,
+    pub disputed_at: u64,
+    pub resolved: Option<bool>,
 }
 
 /// Governance proposal to change the protocol slash threshold (`Config.slash_bps`).
