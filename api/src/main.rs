@@ -159,6 +159,43 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
+async fn ready_check(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // JWT check: generate and verify a token
+    let jwt_check = match state.jwt_auth.generate_token("health_check", 1) {
+        Ok(token) => match state.jwt_auth.verify_token(&token) {
+            Ok(_) => ("ok", None::<String>),
+            Err(e) => ("fail", Some(e.to_string())),
+        },
+        Err(e) => ("fail", Some(e.to_string())),
+    };
+
+    // Webhook manager check: ensure we can access subscriptions and deliveries
+    let webhook_subs = state.webhook_manager.get_subscriptions().await;
+    let webhook_deliveries = state.webhook_manager.get_deliveries().await;
+    let webhook_ok = ("ok", None::<String>);
+
+    // Logger check: ensure we can access logs
+    let _logs = state.logger.get_logs().await;
+    let logger_ok = ("ok", None::<String>);
+
+    let status = if jwt_check.0 == "ok" && webhook_ok.0 == "ok" && logger_ok.0 == "ok" {
+        "ok"
+    } else {
+        "fail"
+    };
+
+    let resp = serde_json::json!({
+        "status": status,
+        "components": {
+            "jwt": { "status": jwt_check.0, "error": jwt_check.1 },
+            "webhook_manager": { "status": webhook_ok.0, "subscriptions_count": webhook_subs.len(), "deliveries_count": webhook_deliveries.len() },
+            "logger": { "status": logger_ok.0 }
+        }
+    });
+
+    Ok(Json(resp))
+}
+
 pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_target(false)
@@ -177,6 +214,7 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/ready", get(ready_check))
         .route("/auth/token", post(authenticate))
         .route("/auth/verify", post(verify_token))
         .route("/webhooks/subscribe", post(subscribe_webhook))

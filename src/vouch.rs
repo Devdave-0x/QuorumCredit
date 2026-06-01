@@ -9,6 +9,7 @@ use crate::types::{
     PARTIAL_WITHDRAWAL_MAX_BPS, PARTIAL_WITHDRAWAL_PENALTY_BPS, BPS_DENOMINATOR,
 };
 use soroban_sdk::{symbol_short, token, Address, Env, Vec};
+use soroban_sdk::BytesN;
 
 /// Verify that `token` is accepted by the registered bridge for `chain_id`.
 /// Returns an error if no active bridge record exists for this chain.
@@ -957,6 +958,65 @@ pub fn get_voucher_stats(
             total_yield_earned: 0,
             total_slashed: 0,
         })
+}
+
+/// Allow a voucher to dispute a recent repayment for a borrower if they believe it's fraudulent.
+/// Stores a `DisputeRecord` at `DataKey::RepaymentDispute(borrower, voucher)`.
+pub fn dispute_vouch(
+    env: Env,
+    voucher: Address,
+    borrower: Address,
+    evidence_hash: BytesN<32>,
+) -> Result<(), ContractError> {
+    voucher.require_auth();
+    crate::helpers::require_not_paused(&env)?;
+
+    // Ensure the voucher has historically vouched for this borrower.
+    let history_key = crate::types::DataKey::VouchHistory(borrower.clone(), voucher.clone(), crate::helpers::config(&env).token.clone());
+    let has_history: bool = env
+        .storage()
+        .persistent()
+        .get::<crate::types::DataKey, Vec<crate::types::VouchHistoryEntry>>(&history_key)
+        .map(|h| h.len() > 0)
+        .unwrap_or(false);
+
+    if !has_history {
+        return Err(ContractError::VoucherNotFound);
+    }
+
+    // Verify there is a recent repayment to dispute (latest loan was repaid within window)
+    let latest = crate::helpers::get_latest_loan_record(&env, &borrower).ok_or(ContractError::NoActiveLoan)?;
+    if latest.status != crate::types::LoanStatus::Repaid {
+        return Err(ContractError::InvalidStateTransition);
+    }
+
+    // Prevent duplicate disputes
+    let existing: Option<crate::types::DisputeRecord> = env
+        .storage()
+        .persistent()
+        .get(&crate::types::DataKey::RepaymentDispute(borrower.clone(), voucher.clone()));
+    if existing.is_some() {
+        return Err(ContractError::AlreadyVoted);
+    }
+
+    let dispute = crate::types::DisputeRecord {
+        borrower: borrower.clone(),
+        voucher: voucher.clone(),
+        evidence_hash,
+        disputed_at: env.ledger().timestamp(),
+        resolved: None,
+    };
+
+    env.storage()
+        .persistent()
+        .set(&crate::types::DataKey::RepaymentDispute(borrower.clone(), voucher.clone()), &dispute);
+
+    env.events().publish(
+        (symbol_short!("dispute"), symbol_short!("repayment")),
+        (voucher, borrower),
+    );
+
+    Ok(())
 }
 
 pub fn total_vouched(env: Env, borrower: Address) -> Result<i128, ContractError> {
