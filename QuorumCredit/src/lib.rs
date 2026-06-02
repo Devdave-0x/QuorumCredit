@@ -116,6 +116,10 @@ mod vouch_global_cooldown_test;
 mod stake_decay_test;
 #[cfg(test)]
 mod vouch_conditions_test;
+#[cfg(test)]
+mod timestamp_validation_test;
+#[cfg(test)]
+mod emergency_shutdown_test;
 
 pub use errors::ContractError;
 pub use types::*;
@@ -164,6 +168,8 @@ impl QuorumCreditContract {
                 veto_admin: None,
                 decay_rate_bps: 0,
                 decay_period_secs: 0,
+                timestamp_tolerance_seconds: DEFAULT_TIMESTAMP_TOLERANCE_SECS,
+                emergency_shutdown_enabled: false,
             },
         );
 
@@ -880,6 +886,16 @@ impl QuorumCreditContract {
 
     pub fn get_config(env: Env) -> Config {
         admin::get_config(env)
+    }
+
+    /// #700: Set timestamp tolerance for transaction validation.
+    pub fn set_timestamp_tolerance(env: Env, admin_signers: Vec<Address>, tolerance_secs: u64) {
+        admin::set_timestamp_tolerance(env, admin_signers, tolerance_secs)
+    }
+
+    /// #701: Enable or disable emergency shutdown of the contract.
+    pub fn set_emergency_shutdown(env: Env, admin_signers: Vec<Address>, enabled: bool) {
+        admin::set_emergency_shutdown(env, admin_signers, enabled)
     }
 
     pub fn get_admin_audit_log(env: Env) -> Vec<AdminAuditEntry> {
