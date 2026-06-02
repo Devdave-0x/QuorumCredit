@@ -131,7 +131,7 @@ jobs:
           path: contract_id.txt
 
       - name: Notify Team via Commit Comment
-        uses: peter-evans/commit-comment@v3
+        uses: peter-evans/commit-comment@v4
         if: success()
         with:
           body: |
