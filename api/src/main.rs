@@ -57,9 +57,7 @@ pub struct WebhookEventRequest {
 }
 
 async fn logging_middleware(
-async fn logging_middleware(
     State(state): State<AppState>,
-    req: Request<axum::body::Body>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
