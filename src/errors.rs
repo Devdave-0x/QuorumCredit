@@ -88,4 +88,18 @@ pub enum ContractError {
     ArithmeticError = 62,
     /// No rollback snapshot found for the requested deployment index (#744).
     RollbackSnapshotNotFound = 63,
+    /// No Ed25519 verification key is configured for the origin chain.
+    BridgeNotConfigured = 100,
+    /// The origin/destination chain combination is invalid.
+    InvalidBridgeChain = 101,
+    /// This origin-chain nonce has already been consumed.
+    ReplayAttackDetected = 102,
+    /// The attestation is outside the accepted freshness window.
+    AttestationExpired = 103,
+    /// The attestation timestamp is too far ahead of the ledger clock.
+    AttestationFromFuture = 104,
+    /// This canonical loan has already moved its reputation to another chain.
+    ReputationAlreadySpent = 105,
+    /// A newer reputation attestation has already been applied.
+    StaleBridgeAttestation = 106,
 }

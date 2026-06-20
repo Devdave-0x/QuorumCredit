@@ -16,9 +16,11 @@ pub mod cache;
 pub mod error_response;
 pub mod versioning;
 pub mod proof_validator;
+pub mod cross_chain;
 
 pub use errors::ContractError;
 pub use types::*;
+pub use cross_chain::{BridgeAttestation, BridgeAttestationPayload, CrossChainLoanMetadata, UnifiedReputation};
 
 #[cfg(test)]
 mod slash_threshold_voting_test;
@@ -1536,5 +1538,60 @@ impl QuorumCreditContract {
 
     pub fn claim_successor_admin(env: Env) -> Result<(), ContractError> {
         admin::claim_successor_admin(env)
+    }
+
+    // ── Issue #14: Cross-chain loan portability ───────────────────────────────
+
+    pub fn set_bridge_public_key(
+        env: Env,
+        admin_signers: Vec<Address>,
+        origin_chain: u32,
+        public_key: soroban_sdk::BytesN<32>,
+    ) -> Result<(), ContractError> {
+        cross_chain::set_bridge_public_key(env, admin_signers, origin_chain, public_key)
+    }
+
+    pub fn validate_bridge_attestation(
+        env: Env,
+        metadata: CrossChainLoanMetadata,
+        attestation: BridgeAttestation,
+    ) -> Result<(), ContractError> {
+        cross_chain::validate_bridge_attestation(env, metadata, attestation)
+    }
+
+    pub fn bridge_attestation_message(
+        env: Env,
+        metadata: CrossChainLoanMetadata,
+        nonce: u64,
+        timestamp: u64,
+    ) -> soroban_sdk::Bytes {
+        cross_chain::bridge_attestation_message(&env, &metadata, nonce, timestamp)
+    }
+
+    pub fn mirror_loan_to_chain(
+        env: Env,
+        metadata: CrossChainLoanMetadata,
+        attestation: BridgeAttestation,
+    ) -> Result<(), ContractError> {
+        cross_chain::mirror_loan_to_chain(env, metadata, attestation)
+    }
+
+    pub fn query_reputation_cross_chain(
+        env: Env,
+        borrower: Address,
+    ) -> Option<UnifiedReputation> {
+        cross_chain::query_reputation_cross_chain(env, borrower)
+    }
+
+    pub fn query_mirrored_loan(
+        env: Env,
+        origin_chain: u32,
+        loan_id: u64,
+    ) -> Option<CrossChainLoanMetadata> {
+        cross_chain::query_mirrored_loan(env, origin_chain, loan_id)
+    }
+
+    pub fn is_bridge_nonce_used(env: Env, origin_chain: u32, nonce: u64) -> bool {
+        cross_chain::is_bridge_nonce_used(env, origin_chain, nonce)
     }
 }

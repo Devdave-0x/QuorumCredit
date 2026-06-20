@@ -1961,4 +1961,59 @@ impl QuorumCreditContract {
     pub fn disable_auto_repay(env: Env, borrower: Address) -> Result<(), ContractError> {
         loan::disable_auto_repay(env, borrower)
     }
+
+    // ── Issue #14: Cross-chain loan portability ───────────────────────────────
+
+    pub fn set_bridge_public_key(
+        env: Env,
+        admin_signers: Vec<Address>,
+        origin_chain: u32,
+        public_key: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        crate::cross_chain::set_bridge_public_key(env, admin_signers, origin_chain, public_key)
+    }
+
+    pub fn validate_bridge_attestation(
+        env: Env,
+        metadata: crate::cross_chain::CrossChainLoanMetadata,
+        attestation: crate::cross_chain::BridgeAttestation,
+    ) -> Result<(), ContractError> {
+        crate::cross_chain::validate_bridge_attestation(env, metadata, attestation)
+    }
+
+    pub fn bridge_attestation_message(
+        env: Env,
+        metadata: crate::cross_chain::CrossChainLoanMetadata,
+        nonce: u64,
+        timestamp: u64,
+    ) -> soroban_sdk::Bytes {
+        crate::cross_chain::bridge_attestation_message(&env, &metadata, nonce, timestamp)
+    }
+
+    pub fn mirror_loan_to_chain(
+        env: Env,
+        metadata: crate::cross_chain::CrossChainLoanMetadata,
+        attestation: crate::cross_chain::BridgeAttestation,
+    ) -> Result<(), ContractError> {
+        crate::cross_chain::mirror_loan_to_chain(env, metadata, attestation)
+    }
+
+    pub fn query_reputation_cross_chain(
+        env: Env,
+        borrower: Address,
+    ) -> Option<crate::cross_chain::UnifiedReputation> {
+        crate::cross_chain::query_reputation_cross_chain(env, borrower)
+    }
+
+    pub fn query_mirrored_loan(
+        env: Env,
+        origin_chain: u32,
+        loan_id: u64,
+    ) -> Option<crate::cross_chain::CrossChainLoanMetadata> {
+        crate::cross_chain::query_mirrored_loan(env, origin_chain, loan_id)
+    }
+
+    pub fn is_bridge_nonce_used(env: Env, origin_chain: u32, nonce: u64) -> bool {
+        crate::cross_chain::is_bridge_nonce_used(env, origin_chain, nonce)
+    }
 }

@@ -555,7 +555,7 @@ pub struct RestructureRequest {
 
 /// A single payment event recorded against a loan.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentRecord {
     /// Amount paid in this transaction, in stroops.
     pub amount: i128,
