@@ -53,6 +53,14 @@ mod admin_whitelist_blacklist_test;
 mod governance_queue_test;
 #[cfg(test)]
 mod credit_score_test;
+#[cfg(test)]
+mod integration_scenarios;
+#[cfg(test)]
+mod integration_invariants;
+#[cfg(test)]
+mod integration_stress_test;
+#[cfg(test)]
+mod integration_regression_test;
 
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
