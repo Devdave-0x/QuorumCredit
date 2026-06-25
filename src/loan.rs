@@ -6,15 +6,22 @@ use crate::helpers::{
 };
 use crate::reputation::ReputationNftExternalClient;
 use crate::types::{
-    DataKey, EscrowStatus, LoanRecord, LoanStatus, SlashRecord, VouchRecord, BPS_DENOMINATOR,
-    SLASH_ESCROW_PERIOD,
+    DataKey, EscrowStatus, LoanRecord, LoanStatus, SlashRecord, VouchRecord, VoucherStats,
+    BPS_DENOMINATOR, SLASH_ESCROW_PERIOD,
 };
 use soroban_sdk::{panic_with_error, symbol_short, Address, Env, Vec};
+
+/// Vouch-age bonus constants
+const VOUCH_AGE_BONUS_MIN_SECS: u64 = 30 * 24 * 60 * 60;   // 30 days
+const VOUCH_AGE_BONUS_PERIOD_SECS: u64 = 30 * 24 * 60 * 60; // 30 days per period
+const VOUCH_AGE_BONUS_BPS_PER_PERIOD: i128 = 25;             // +25 bps per period
+const VOUCH_AGE_BONUS_MAX_BPS: i128 = 200;                   // cap at 200 bps
 
 /// Compute the yield rate (in bps) for a single vouch, incorporating:
 /// - base yield from config
 /// - vouch-age bonus: +25 bps per 30-day period the vouch has been active (capped at 200 bps)
 /// - borrower reputation bonus: up to +100 bps based on successful repayment history
+/// - voucher reputation bonus: up to +100 bps based on voucher's successful vouch history (Issue #866)
 pub fn vouch_yield_bps(env: &Env, vouch: &VouchRecord, borrower: &Address, now: u64) -> i128 {
     let base_bps = config(env).yield_bps;
 
@@ -44,7 +51,17 @@ pub fn vouch_yield_bps(env: &Env, vouch: &VouchRecord, borrower: &Address, now: 
         .max(0)
         .min(REPUTATION_BONUS_MAX_BPS);
 
-    (base_bps + age_bonus + rep_bonus).max(0)
+    // ── Voucher reputation bonus (Issue #866) ─────────────────────────────────
+    // Vouchers with more successful vouch history earn a yield bonus.
+    let voucher_stats: Option<VoucherStats> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::VoucherStats(vouch.voucher.clone()));
+    let voucher_rep_bonus = voucher_stats
+        .map(|s| (s.successful_vouches as i128 * 10).min(REPUTATION_BONUS_MAX_BPS))
+        .unwrap_or(0);
+
+    (base_bps + age_bonus + rep_bonus + voucher_rep_bonus).max(0)
 }
 
 /// Calculate dynamic yield (legacy — used for backward-compat; prefer vouch_yield_bps per vouch).
@@ -99,10 +116,14 @@ pub fn request_loan(
         .get(&DataKey::Vouches(borrower.clone()))
         .unwrap_or(Vec::new(&env));
 
+    // Compute reputation-weighted total stake (Issue #866)
     let total_stake: i128 = vouches
         .iter()
         .filter(|v| v.token == token_addr)
-        .map(|v| v.stake)
+        .map(|v| {
+            let weight = crate::vouch::vouch_reputation_weight(&env, &v.voucher);
+            v.stake * weight / BPS_DENOMINATOR
+        })
         .sum();
 
     if total_stake < threshold {
@@ -112,8 +133,14 @@ pub fn request_loan(
     let now = env.ledger().timestamp();
     let loan_id = next_loan_id(&env);
 
-    // ── Per-vouch yield (age + reputation aware) ──────────────────────────────
-    // Compute each voucher's individual yield share and store it for repayment.
+    // ── Credit score tier rewards ────────────────────────────────────────────
+    // Apply tier-based yield bonus to base yield rate (Issue #866)
+    let tier_adjusted_yield_bps = crate::credit_score::apply_tier_rewards_to_yield(
+        &env, &borrower, config(&env).yield_bps,
+    );
+
+    // ── Per-vouch yield (age + reputation + tier + weight aware) ────────────
+    // Compute each voucher's individual yield share using reputation-weighted stake.
     let mut yield_distribution: Vec<YieldDistributionEntry> = Vec::new(&env);
     let mut total_yield: i128 = 0;
 
@@ -122,13 +149,22 @@ pub fn request_loan(
             continue;
         }
         let rate = vouch_yield_bps(&env, &v, &borrower, now);
-        let vouch_yield = amount * v.stake / total_stake * rate / 10_000;
+        // Apply tier rewards on top of per-vouch rate (Issue #866)
+        let effective_rate = rate + (tier_adjusted_yield_bps - config(&env).yield_bps);
+        let weight = crate::vouch::vouch_reputation_weight(&env, &v.voucher);
+        let weighted_stake = v.stake * weight / BPS_DENOMINATOR;
+        let vouch_yield = amount * weighted_stake / total_stake * effective_rate / 10_000;
         total_yield += vouch_yield;
         yield_distribution.push_back(YieldDistributionEntry {
             voucher: v.voucher.clone(),
             yield_amount: vouch_yield,
         });
     }
+
+    // Store yield distribution for repayment-time lookup
+    env.storage()
+        .persistent()
+        .set(&DataKey::YieldDistribution(loan_id), &yield_distribution);
 
     let loan = LoanRecord {
         id: loan_id,
@@ -300,6 +336,10 @@ pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractE
         loan.status = LoanStatus::Repaid;
         loan.repayment_timestamp = Some(now);
 
+        // Process withdrawal queue BEFORE vouch payout (Issue #865: progressive stake unlock).
+        // This removes queued withdrawals from the vouches list and transfers their stake back.
+        crate::vouch::process_withdrawal_queue(&env, &borrower);
+
         let vouches: Vec<VouchRecord> = env
             .storage()
             .persistent()
@@ -372,6 +412,9 @@ pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractE
         // Try to mint excellent credit tier badge if eligible
         let _ = crate::reputation::mint_excellent_badge(&env, &borrower);
 
+        // Update credit score after successful repayment
+        let _ = crate::credit_score::update_credit_score(env.clone(), borrower.clone());
+
         env.storage()
             .persistent()
             .remove(&DataKey::ActiveLoan(borrower.clone()));
@@ -386,9 +429,6 @@ pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractE
             (symbol_short!("loan"), symbol_short!("repaid")),
             (borrower.clone(), loan.amount),
         );
-
-        // Process withdrawal queue after loan is fully repaid (Issue #10)
-        crate::vouch::process_withdrawal_queue(&env, &borrower);
     }
 
     env.storage()
@@ -417,7 +457,10 @@ pub fn is_eligible(env: Env, borrower: Address, threshold: i128, token: Address)
     let total: i128 = vouches
         .iter()
         .filter(|v| v.token == token)
-        .map(|v| v.stake)
+        .map(|v| {
+            let weight = crate::vouch::vouch_reputation_weight(&env, &v.voucher);
+            v.stake * weight / BPS_DENOMINATOR
+        })
         .sum();
 
     total >= threshold

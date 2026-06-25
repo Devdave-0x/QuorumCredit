@@ -59,6 +59,9 @@ pub const TIMELOCK_EXPIRY: u64 = 72 * 60 * 60;
 /// immediately withdraws.
 pub const MIN_VOUCH_LOCK_PERIOD: u64 = 7 * 24 * 60 * 60;
 
+/// Maximum reputation bonus for vouchers, in basis points (100 = 1%).
+pub const REPUTATION_BONUS_MAX_BPS: i128 = 100;
+
 /// Duration of slash escrow period before funds are burned or returned, in seconds (7 days).
 pub const SLASH_APPEAL_PERIOD: u64 = 7 * 24 * 60 * 60;
 
@@ -1275,6 +1278,24 @@ pub struct QueuedWithdrawal {
     pub partial: bool,
     /// Priority fee paid by the voucher (in stroops), distributed to remaining vouchers.
     pub priority_fee: i128,
+}
+
+/// Per-vouch yield allocation, locked at loan disbursement.
+#[contracttype]
+#[derive(Clone)]
+pub struct YieldDistributionEntry {
+    pub voucher: Address,
+    pub yield_amount: i128,
+}
+
+/// Cumulative vouch reputation statistics for a voucher address.
+#[contracttype]
+#[derive(Clone)]
+pub struct VoucherStats {
+    pub successful_vouches: u32,
+    pub total_vouches_slashed: u32,
+    pub total_yield_earned: i128,
+    pub total_slashed: i128,
 }
 
 /// Current API version of the contract.
